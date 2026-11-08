@@ -51,42 +51,75 @@ Voiz Contact Center برای تیم‌هایی طراحی شده است که م�
 ```bash
 cd /opt && \
 rm -rf voiz-console voiz-console.tar.gz && \
-curl -fL https://github.com/voipiran/voiz-console/archive/refs/heads/main.tar.gz \
+curl -fL https://voipiran.io/clover/voiz-console.tar.gz \
   -o voiz-console.tar.gz && \
-tar -xzf voiz-console.tar.gz && \
-mv voiz-console-main voiz-console && \
+mkdir -p voiz-console && \
+tar -xzf voiz-console.tar.gz --strip-components=1 -C voiz-console && \
 cd voiz-console && \
-sudo bash contactcenter.sh
+sudo bash install-console.sh
 ```
 
-`contactcenter.sh` نصب کامل Issabel را اجرا می‌کند و خودش `install-console.sh` و سپس `voipiran-patch/apply.sh` را اجرا می‌کند. روی Issabel فقط همین دستور را اجرا کنید؛ `install-console.sh` را جداگانه قبل از آن اجرا نکنید.
+`install-console.sh` نقطه‌ی شروع واحد نصب است. روی Issabel 5، همین فایل Console، وابستگی‌های آفلاین، تنظیمات Nginx، ChanSpy و سفارشی‌سازی‌های VOIPIRAN را انجام می‌دهد؛ فایل جداگانه‌ی `contactcenter.sh` دیگر وجود ندارد.
 
-### نصب کنسول روی FreePBX یا اجرای نصب‌کننده به‌تنهایی
+آرشیو نصب باید در مسیر `https://voipiran.io/clover/voiz-console.tar.gz` منتشر شده باشد. این بسته می‌تواند وابستگی‌های آماده‌شده را در `offline-assets/el8-x86_64` همراه خود داشته باشد؛ نصب‌کننده ابتدا از فایل‌های محلی استفاده می‌کند و در نبود آن‌ها از مسیرهای آفلاین ویپ ایران کمک می‌گیرد.
+
+### آماده‌سازی وابستگی‌های آفلاین
+
+برای ساخت مجدد بسته‌ها، اسکریپت زیر را روی یک میزبان متصل به مخازن و سازگار با EL8 x86_64 اجرا کنید؛ این اسکریپت برای اجرا روی PBX مقصد نیست:
+
+```bash
+bash scripts/prepare-offline-assets.sh /tmp/voiz-console-assets
+```
+
+خروجی در `/tmp/voiz-console-assets/el8-x86_64` ساخته می‌شود و شامل RPMهای وابستگی، wheelهای Python، کش npm، NVM و Node.js است. فایل‌های این پوشه و آرشیو Console باید پس از بررسی در مسیرهای متناظر زیر `/clover` روی سایت ویپ ایران منتشر شوند. این مجموعه فعلاً برای EL8 x86_64 آماده شده است؛ بسته‌های Issabel 4 / EL7 در آن نیستند.
+
+اگر میزبان EL8 برای آماده‌سازی در دسترس نیست، مخزن را به GitHub ببرید و از مسیر **Actions → Prepare EL8 offline bundle → Run workflow** اجرا کنید. Workflow وابستگی‌های RPM را داخل Rocky Linux 8 resolve می‌کند، نصب مجموعهٔ RPM را با Repositoryهای غیرفعال می‌آزماید و آرشیو `voiz-console.tar.gz` به‌همراه checksum را به‌عنوان Artifact می‌سازد. Artifact را دانلود کنید و فقط پس از موفقیت Workflow برای نصب یا انتشار استفاده کنید.
+
+محتوای پوشه‌های `contactcenter-rpms`، `contactcenter-wheels`، `contactcenter-vad-wheels`، `contactcenter-runtime` و `nginx-rpms` را به‌ترتیب در مسیرهای هم‌نام زیر `/clover` منتشر کنید؛ آرشیو Console نیز باید در `/clover/voiz-console.tar.gz` باشد. فایل‌های `manifest.txt` و `SHA256SUMS` هر مجموعه را همراه همان مجموعه نگه دارید.
+
+برای ساخت آرشیو Console از ریشه مخزن:
+
+```bash
+tar -czf /tmp/voiz-console.tar.gz \
+  --exclude='*/.git' --exclude='*/node_modules' --exclude='*/backend/dist' \
+  --exclude='*/contactcenter.sh.bak' \
+  -C .. "$(basename "$PWD")"
+sha256sum /tmp/voiz-console.tar.gz > /tmp/voiz-console.tar.gz.sha256
+```
+
+آرشیو و فایل `.sha256` را با هم در مسیر `/clover` منتشر کنید.
+
+### نصب کنسول روی Issabel یا اجرای نصب‌کننده به‌تنهایی
 
 ```bash
 sudo rm -rf /opt/voiz-console
-sudo git clone --depth 1 https://github.com/voipiran/voiz-console.git \
-/opt/voiz-console
+sudo mkdir -p /opt/voiz-console
+sudo curl -fL https://voipiran.io/clover/voiz-console.tar.gz \
+  -o /tmp/voiz-console.tar.gz
+sudo tar -xzf /tmp/voiz-console.tar.gz --strip-components=1 \
+  -C /opt/voiz-console
 cd /opt/voiz-console
 sudo bash install-console.sh
 ```
 
-اسکریپت `install-console.sh` محیط لازم را آماده می‌کند، نسخه bundled برنامه را در مسیر عملیاتی `/opt/OpDesk` قرار می‌دهد، Node.js و Python مورد نیاز را بررسی / نصب می‌کند و سرویس‌های لازم را برای اجرا آماده می‌سازد. نصب‌کننده به‌صورت عمدی کد را از پروژه والد Clone نمی‌کند؛ نسخه هماهنگ‌شده Voiz از همین مخزن استفاده می‌شود.
+اسکریپت `install-console.sh` محیط لازم را آماده می‌کند، نسخه‌ی bundled برنامه را در `/opt/OpDesk` قرار می‌دهد، Node.js و Python مورد نیاز را بررسی/نصب می‌کند و سرویس‌های لازم را آماده می‌سازد. روی Issabel 5 همچنین تنظیمات PBX و سفارشی‌سازی‌های VOIPIRAN را اعمال می‌کند. نصب‌کننده کد را از پروژه‌ی والد Clone نمی‌کند؛ از نسخه‌ی هماهنگ‌شده‌ی همین مخزن استفاده می‌شود.
+
+نصب‌کننده ابتدا وجود Node.js 20+ به‌همراه npm را بررسی می‌کند و فقط در صورت نیاز NVM را از آرشیو محلی/آینه ویپ ایران آماده می‌کند. در بسته آفلاین، Node.js، کش npm و wheelهای VAD از فایل‌های محلی/آینه ویپ ایران نصب می‌شوند؛ برای دریافت NVM یا Node.js به GitHub مراجعه نمی‌شود و NVM فقط runtime محلی را فعال می‌کند.
 
 فایل `install.sh` نسخه‌ی اصلی OpDesk از شاخه‌ی upstream است و فقط برای مقایسه و بررسی تغییرات نگه‌داری می‌شود؛ برای نصب Voiz آن را اجرا نکنید. تغییرات مهم upstream باید پس از بررسی، به‌صورت انتخابی به `install-console.sh` منتقل شوند تا تنظیمات اختصاصی Voiz حفظ شوند.
 
 در ابتدای نصب، اگر `curl` و `openssl` از قبل روی سیستم موجود باشند، هیچ بسته‌ای برای ابزارهای پایه نصب نمی‌شود. نصب Python، Nginx و وابستگی‌های runtime در مراحل بعدی و فقط در صورت نیاز انجام می‌شود؛ در آن مراحل مدیر بسته سیستم‌عامل ممکن است متادیتای Repositoryهای فعال را بررسی کند.
 
-### اجرای مستقیم نسخه موجود در مخزن
+### اجرای مستقیم نسخه‌ی موجود در مخزن
 
-اگر پروژه از قبل روی سرور Issabel قرار دارد، نصب کامل را فقط با این دستور اجرا کنید:
+اگر پروژه از قبل روی سرور قرار دارد، نصب را با همین نقطه‌ی ورود اجرا کنید:
 
 ```bash
 cd /opt/voiz-console
-sudo bash contactcenter.sh
+sudo bash install-console.sh
 ```
 
-برای FreePBX یا اجرای مستقل نصب‌کننده‌ی کنسول، از `sudo bash install-console.sh` استفاده کنید؛ `contactcenter.sh` مخصوص Issabel است.
+روی سیستم‌های غیر Issabel، نصب‌کننده فقط اجزای Console را آماده می‌کند و تنظیمات اختصاصی Issabel را رد می‌کند.
 
 > اجرای نصب با `sudo` توصیه می‌شود، چون اسکریپت با مسیرهای سیستمی، تنظیمات Asterisk و سرویس‌های سیستم‌عامل کار می‌کند.
 
@@ -173,14 +206,14 @@ sudo bash contactcenter.sh
 
 ## راه‌اندازی اتصال مرکز تماس
 
-اسکریپت `contactcenter.sh` نصب کامل Issabel را هماهنگ می‌کند: وابستگی‌های اختصاصی را نصب می‌کند، `install-console.sh` را اجرا می‌کند و سپس سفارشی‌سازی‌های `voipiran-patch/apply.sh` را اعمال می‌کند. بنابراین روی Issabel آن را یک‌بار به‌عنوان دستور اصلی نصب اجرا کنید، نه بعد از اجرای جداگانه‌ی `install-console.sh`:
+`install-console.sh` روی Issabel 5 نصب کامل را انجام می‌دهد و تنظیمات ChanSpy و Feature Codeها را با اطلاعات موجود در `/etc/issabel.conf` اعمال می‌کند. این فایل نقطه‌ی شروع نصب است؛ `install.sh` اصلی upstream اجرا یا تغییر داده نمی‌شود:
 
 ```bash
-cd /opt/voiz-contact-center
-sudo bash contactcenter.sh
+cd /opt/voiz-console
+sudo bash install-console.sh
 ```
 
-این اسکریپت روی Issabel اطلاعات اتصال دیتابیس را می‌خواند و تنظیمات مورد نیاز ChanSpy و Feature Codeهای نظارت تماس را در Asterisk اعمال می‌کند. اگر اطلاعات دیتابیس به‌صورت خودکار پیدا نشود، اسکریپت آن‌ها را به‌صورت تعاملی درخواست می‌کند.
+اگر رمز دیتابیس ریشه از `/etc/issabel.conf` خوانده نشود، نصب با پیام خطا متوقف می‌شود تا تنظیمات Asterisk ناقص باقی نماند.
 
 پس از پایان نصب:
 
@@ -263,9 +296,8 @@ voiz-contact-center/
 ├── nginx/               # نمونه تنظیمات Reverse Proxy
 ├── screenshots/         # تصاویر معرفی رابط کاربری
 ├── docs/                # راهنماهای فنی و API
-├── contactcenter.sh     # تنظیمات تکمیلی Asterisk و ChanSpy
 ├── install.sh           # نسخه اصلی OpDesk برای مقایسه (اجرا نکنید)
-├── install-console.sh   # نصب و آماده‌سازی محیط Voiz
+├── install-console.sh   # نقطه‌ی شروع نصب Console و Issabel
 └── start.sh             # اجرای توسعه‌ای و production
 ```
 

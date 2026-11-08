@@ -1,20 +1,21 @@
 .git
 .github
+!.github/
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/prepare-el8-offline-bundle.yml
 .vscode
 
-<<<<<<< HEAD
-frontend/node_modules
-# frontend/dist is committed on purpose: servers install the pre-built bundle (no npm build in production)
-=======
 # Node: dependencies and build output
 node_modules
-frontend/dist
+frontend/node_modules
+# frontend/dist is committed on purpose: servers install the pre-built bundle (no npm build in production)
 frontend/dist.prev
 backend/dist
 backend/dist.prev
 backend/coverage
 *.tsbuildinfo
->>>>>>> upstream/main
 
 # Voice-activity analysis venv (install.sh) and Python bytecode
 backend/vad/.venv/

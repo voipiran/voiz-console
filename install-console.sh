@@ -13,6 +13,18 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' 
+INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VOIPIRAN_SOURCE_ROOT="$INSTALLER_DIR"
+OFFLINE_ASSET_ROOT="$INSTALLER_DIR/offline-assets/el8-x86_64"
+INSTALLER_TEMP_DIRS=()
+
+cleanup_installer_temp_dirs() {
+    local directory
+    for directory in "${INSTALLER_TEMP_DIRS[@]}"; do
+        [[ -n "$directory" && -d "$directory" ]] && rm -rf -- "$directory"
+    done
+}
+trap cleanup_installer_temp_dirs EXIT
 
 if [[ -t 1 && -n "${TERM:-}" ]] && command -v clear >/dev/null 2>&1; then
     clear || true
@@ -21,6 +33,236 @@ fi
 # Function to check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+verify_sha256sums() {
+    local directory="$1" checksum_file="${2:-SHA256SUMS}"
+    [[ -s "$directory/$checksum_file" ]] || return 1
+    sed 's/\r$//' "$directory/$checksum_file" |
+        (cd "$directory" && sha256sum -c -)
+}
+
+install_issabel_rpm_dependencies() {
+    [[ -f /etc/issabel.conf ]] || return 0
+
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo -e "${RED}Run the Issabel installer as root (sudo bash install-console.sh).${NC}"
+        return 1
+    fi
+    if [[ "${VERSION_ID%%.*}" != "8" || "$(uname -m)" != "x86_64" ]]; then
+        echo -e "${RED}The bundled Issabel dependencies support EL8 x86_64 (Issabel 5) only.${NC}"
+        return 1
+    fi
+
+    local rpm_dir local_rpm_dir rpm_file
+    rpm_dir=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-rpms.XXXXXX")
+    INSTALLER_TEMP_DIRS+=("$rpm_dir")
+    local_rpm_dir="$OFFLINE_ASSET_ROOT/contactcenter-rpms"
+
+    if [[ -s "$local_rpm_dir/manifest.txt" ]]; then
+        echo -e "${YELLOW}Using bundled ContactCenter RPM packages...${NC}"
+        cp -a "$local_rpm_dir/." "$rpm_dir/"
+        if ! verify_sha256sums "$rpm_dir"; then
+            echo -e "${RED}Bundled ContactCenter RPM checksum verification failed.${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}Downloading ContactCenter RPMs from the VoIPiran mirror...${NC}"
+        if ! curl -fsSL --connect-timeout 15 --max-time 120 \
+            https://voipiran.io/clover/contactcenter-rpms/manifest.txt \
+            -o "$rpm_dir/manifest.txt"; then
+            echo -e "${RED}Failed to download the ContactCenter RPM manifest.${NC}"
+            return 1
+        fi
+
+        while IFS= read -r rpm_file || [[ -n "$rpm_file" ]]; do
+            rpm_file="${rpm_file//$'\r'/}"
+            [[ -z "$rpm_file" || "$rpm_file" =~ ^# ]] && continue
+            if [[ "$rpm_file" != "$(basename "$rpm_file")" || "$rpm_file" != *.rpm ]]; then
+                echo -e "${RED}Invalid RPM manifest entry: $rpm_file${NC}"
+                return 1
+            fi
+            if ! curl -fsSL --connect-timeout 15 --max-time 300 \
+                "https://voipiran.io/clover/contactcenter-rpms/$rpm_file" \
+                -o "$rpm_dir/$rpm_file"; then
+                echo -e "${RED}Failed to download ContactCenter RPM: $rpm_file${NC}"
+                return 1
+            fi
+        done < "$rpm_dir/manifest.txt"
+
+        if curl -fsSL --connect-timeout 15 --max-time 120 \
+            https://voipiran.io/clover/contactcenter-rpms/SHA256SUMS \
+            -o "$rpm_dir/SHA256SUMS"; then
+            if ! verify_sha256sums "$rpm_dir"; then
+                echo -e "${RED}Downloaded ContactCenter RPM checksum verification failed.${NC}"
+                return 1
+            fi
+        else
+            echo -e "${YELLOW}RPM checksums are not published; downloads came from the VoIPiran HTTPS mirror.${NC}"
+        fi
+    fi
+
+    if ! compgen -G "$rpm_dir/*.rpm" >/dev/null; then
+        echo -e "${RED}No ContactCenter RPM packages were found.${NC}"
+        return 1
+    fi
+
+    if ! dnf install -y --disablerepo="*" "$rpm_dir"/*.rpm; then
+        echo -e "${YELLOW}The local RPM set lacks a dependency; retrying with the configured repositories.${NC}"
+        if ! dnf install -y "$rpm_dir"/*.rpm; then
+            echo -e "${RED}ContactCenter RPM installation failed.${NC}"
+            return 1
+        fi
+    fi
+
+    if ! command_exists python3.11; then
+        echo -e "${RED}Python 3.11 was not installed from the ContactCenter RPM set.${NC}"
+        return 1
+    fi
+}
+
+prepare_contactcenter_python_wheels() {
+    [[ -f /etc/issabel.conf ]] || return 0
+
+    local wheel_file
+    local local_wheel_dir="$OFFLINE_ASSET_ROOT/contactcenter-wheels"
+    CONTACTCENTER_WHEEL_DIR="$local_wheel_dir"
+
+    if [[ ! -s "$CONTACTCENTER_WHEEL_DIR/manifest.txt" ]]; then
+        CONTACTCENTER_WHEEL_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-wheels.XXXXXX")
+        INSTALLER_TEMP_DIRS+=("$CONTACTCENTER_WHEEL_TEMP")
+        CONTACTCENTER_WHEEL_DIR="$CONTACTCENTER_WHEEL_TEMP"
+        echo -e "${YELLOW}Downloading ContactCenter Python wheels from the VoIPiran mirror...${NC}"
+        if ! curl -fsSL --connect-timeout 15 --max-time 120 \
+            https://voipiran.io/clover/contactcenter-wheels/manifest.txt \
+            -o "$CONTACTCENTER_WHEEL_DIR/manifest.txt"; then
+            echo -e "${RED}Failed to download the ContactCenter wheel manifest.${NC}"
+            return 1
+        fi
+
+        while IFS= read -r wheel_file || [[ -n "$wheel_file" ]]; do
+            wheel_file="${wheel_file//$'\r'/}"
+            [[ -z "$wheel_file" || "$wheel_file" =~ ^# ]] && continue
+            if [[ "$wheel_file" != "$(basename "$wheel_file")" || "$wheel_file" != *.whl ]]; then
+                echo -e "${RED}Invalid ContactCenter wheel manifest entry: $wheel_file${NC}"
+                return 1
+            fi
+            if ! curl -fsSL --connect-timeout 15 --max-time 300 \
+                "https://voipiran.io/clover/contactcenter-wheels/$wheel_file" \
+                -o "$CONTACTCENTER_WHEEL_DIR/$wheel_file"; then
+                echo -e "${RED}Failed to download ContactCenter wheel: $wheel_file${NC}"
+                return 1
+            fi
+        done < "$CONTACTCENTER_WHEEL_DIR/manifest.txt"
+
+        if curl -fsSL --connect-timeout 15 --max-time 120 \
+            https://voipiran.io/clover/contactcenter-wheels/SHA256SUMS \
+            -o "$CONTACTCENTER_WHEEL_DIR/SHA256SUMS"; then
+            if ! verify_sha256sums "$CONTACTCENTER_WHEEL_DIR"; then
+                echo -e "${RED}Downloaded ContactCenter wheel checksum verification failed.${NC}"
+                return 1
+            fi
+        else
+            echo -e "${YELLOW}Wheel checksums are not published; downloads came from the VoIPiran HTTPS mirror.${NC}"
+        fi
+    elif ! verify_sha256sums "$CONTACTCENTER_WHEEL_DIR"; then
+        echo -e "${RED}Bundled ContactCenter wheel checksum verification failed.${NC}"
+        return 1
+    fi
+
+    echo -e "${YELLOW}Installing ContactCenter Python dependencies offline...${NC}"
+    if ! "$FINAL_PYTHON_PATH" -m pip install --no-index --no-cache-dir \
+        "$CONTACTCENTER_WHEEL_DIR"/*.whl; then
+        echo -e "${RED}ContactCenter Python dependency installation failed.${NC}"
+        return 1
+    fi
+
+    if ! "$FINAL_PYTHON_PATH" -c \
+        'import dotenv, mysql.connector, fastapi, uvicorn, websockets, httpx, jwt, bcrypt, openpyxl, google.auth, h2, cryptography, webrtcvad, onnxruntime'; then
+        echo -e "${RED}ContactCenter Python dependency verification failed.${NC}"
+        return 1
+    fi
+}
+
+configure_issabel_chanspy() {
+    [[ -f /etc/issabel.conf ]] || return 0
+
+    local db_password extensions_file sql
+    db_password=$(sed -ne 's/.*mysqlrootpwd[[:space:]]*=[[:space:]]*//p' /etc/issabel.conf \
+        | head -n 1 | tr -d '\r' | sed 's/[[:space:]]*$//')
+    if [[ -z "$db_password" ]]; then
+        echo -e "${RED}Could not read mysqlrootpwd from /etc/issabel.conf.${NC}"
+        return 1
+    fi
+    if ! command_exists mysql; then
+        echo -e "${RED}The mysql client is required to configure Issabel ChanSpy feature codes.${NC}"
+        return 1
+    fi
+    if ! mysql -h127.0.0.1 -uroot -p"$db_password" asterisk \
+        -e "SELECT 1 FROM featurecodes LIMIT 1" >/dev/null 2>&1; then
+        echo -e "${RED}Could not access the Issabel featurecodes table with credentials from /etc/issabel.conf.${NC}"
+        return 1
+    fi
+
+    extensions_file="/etc/asterisk/extensions_custom.conf"
+    mkdir -p /etc/asterisk
+    touch "$extensions_file"
+    if ! grep -qF '[from-internal-custom]' "$extensions_file"; then
+        printf '%s\n' '[from-internal-custom]' >> "$extensions_file"
+    fi
+    if ! grep -qF 'include => voipiran-chanspypro' "$extensions_file"; then
+        sed -i '/\[from-internal-custom\]/a include => voipiran-chanspypro' "$extensions_file"
+    fi
+    if ! grep -qF '[voipiran-chanspypro]' "$extensions_file"; then
+        cat >> "$extensions_file" <<'EOD'
+[voipiran-chanspypro]
+exten => _*30X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},Eq)
+
+exten => _*31X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},Eqo)
+
+exten => _*32X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},Eqw)
+
+exten => _*33X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},EqW)
+
+exten => _*34X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},EqB)
+
+exten => _*35X.,1,Set(DEV=${DB(AMPUSER/${EXTEN:3}/device)})
+ same => n,Set(DEV=${CUT(DEV,&,1)})
+ same => n,Set(CHAN=${DB(DEVICE/${DEV}/dial)})
+ same => n,ChanSpy(${CHAN},Eqd)
+EOD
+    fi
+
+    sql=$(cat <<'SQL'
+INSERT INTO featurecodes (modulename, featurename, description, defaultcode, customcode, enabled, providedest) VALUES
+('core','ChanSpy-Simple','شنود ساده، کد + داخلی','*30',NULL,'1','1'),
+('core','ChanSpy-OnlyListen','فقط صدای کارشناس، کد + داخلی','*31',NULL,'1','1'),
+('core','ChanSpy-Whisper','شنود و صحبت پنهانی، کد + داخلی','*32',NULL,'1','1'),
+('core','ChanSpy-PrivateWhisper','صحبت با کارشناس بدون شنیدن مشتری، کد + داخلی','*33',NULL,'1','1'),
+('core','ChanSpy-Barge','شنود و مکالمه با هر دو طرف، کد + داخلی','*34',NULL,'1','1'),
+('core','ChanSpy-DTMF','تغییر حالت شنود حین تماس با کلید 4/5/6، کد + داخلی','*35',NULL,'1','1')
+ON DUPLICATE KEY UPDATE defaultcode=VALUES(defaultcode), enabled='1';
+SQL
+)
+    if ! mysql -h127.0.0.1 -uroot -p"$db_password" asterisk -e "$sql" >/dev/null; then
+        echo -e "${RED}Failed to add Issabel ChanSpy feature codes to the asterisk database.${NC}"
+        return 1
+    fi
 }
 
 # --- Detect mode: fresh install vs update ---
@@ -84,6 +326,8 @@ else
     fi
 fi
 
+install_issabel_rpm_dependencies
+
 
 # ===============================================================
 # VOIPIRAN: GitHub repository setup is disabled.
@@ -129,7 +373,7 @@ fi
 # directory before Step 8 accesses /opt/OpDesk/backend.
 # ===============================================================
 
-VOIPIRAN_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VOIPIRAN_SOURCE_ROOT="$INSTALLER_DIR"
 
 echo ""
 echo "====================================="
@@ -176,24 +420,135 @@ echo -e "${GREEN}Offline OpDesk project prepared successfully.${NC}"
 
 # --- Step 4: Node.js runtime and NestJS backend build ---
 echo -e "\n${YELLOW}Step 4: Installing/checking Node.js runtime...${NC}"
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    echo -e "${YELLOW}Installing NVM...${NC}"
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-fi
+NVM_SERVICE_USER="${SUDO_USER:-$USER}"
+NVM_SERVICE_HOME=$(getent passwd "$NVM_SERVICE_USER" 2>/dev/null | cut -d: -f6 || true)
+NVM_SERVICE_HOME="${NVM_SERVICE_HOME:-$HOME}"
+export NVM_DIR="${NVM_DIR:-$NVM_SERVICE_HOME/.nvm}"
+RUNTIME_ASSET_DIR="$VOIPIRAN_SOURCE_ROOT/offline-assets/el8-x86_64/contactcenter-runtime"
+RUNTIME_ASSET_BASE_URL="https://voipiran.io/clover/contactcenter-runtime"
+NVM_ARCHIVE="$RUNTIME_ASSET_DIR/nvm-v0.40.3.tar.gz"
+NODE_ARCHIVE="$RUNTIME_ASSET_DIR/nodejs/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz"
+TARGET_NODE_VERSION="24.22.2"
+
+verify_runtime_assets() {
+    if [ ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ]; then
+        echo -e "${RED}Offline runtime checksum file is missing: $RUNTIME_ASSET_DIR/SHA256SUMS${NC}"
+        return 1
+    fi
+    verify_sha256sums "$RUNTIME_ASSET_DIR"
+}
+
+runtime_platform_supported() {
+    local machine glibc_version glibc_major glibc_minor
+    machine=$(uname -m)
+    [ "$machine" == "x86_64" ] || return 1
+    glibc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    if [[ ! "$glibc_version" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        return 1
+    fi
+    glibc_major="${BASH_REMATCH[1]}"
+    glibc_minor="${BASH_REMATCH[2]}"
+    (( glibc_major > 2 || (glibc_major == 2 && glibc_minor >= 28) ))
+}
+
+download_runtime_assets() {
+    local relative_path expected_hash
+    mkdir -p "$RUNTIME_ASSET_DIR"
+    if [ ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ] &&
+        ! curl -fsSL --connect-timeout 15 --max-time 120 \
+            "$RUNTIME_ASSET_BASE_URL/SHA256SUMS" \
+            -o "$RUNTIME_ASSET_DIR/SHA256SUMS"; then
+        echo -e "${RED}Failed to download the runtime manifest from VoIPiran.${NC}"
+        return 1
+    fi
+
+    while read -r expected_hash relative_path || [ -n "$expected_hash" ]; do
+        [[ -z "$expected_hash" || "$expected_hash" =~ ^# ]] && continue
+        if [[ ! "$expected_hash" =~ ^[[:xdigit:]]{64}$ ||
+            ! "$relative_path" =~ ^[A-Za-z0-9._/-]+$ ||
+            "$relative_path" == *".."* ]]; then
+            echo -e "${RED}Invalid entry in the bundled runtime manifest: $relative_path${NC}"
+            return 1
+        fi
+        if [ ! -s "$RUNTIME_ASSET_DIR/$relative_path" ]; then
+            mkdir -p "$RUNTIME_ASSET_DIR/$(dirname "$relative_path")"
+            if ! curl -fsSL --connect-timeout 15 --max-time 300 \
+                "$RUNTIME_ASSET_BASE_URL/$relative_path" \
+                -o "$RUNTIME_ASSET_DIR/$relative_path"; then
+                echo -e "${RED}Failed to download runtime asset: $relative_path${NC}"
+                return 1
+            fi
+        fi
+    done < "$RUNTIME_ASSET_DIR/SHA256SUMS"
+
+    verify_runtime_assets
+}
+
+node_runtime_ready() {
+    NODE_VERSION=""
+    NODE_MAJOR=""
+    if ! command_exists node || ! command_exists npm; then
+        return 1
+    fi
+    NODE_VERSION=$(node --version 2>/dev/null || true)
+    if [[ "$NODE_VERSION" =~ ^v([0-9]+)\. ]]; then
+        NODE_MAJOR="${BASH_REMATCH[1]}"
+        [ "$NODE_MAJOR" -ge 20 ] && npm --version >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
 if [ -s "$NVM_DIR/nvm.sh" ]; then
     . "$NVM_DIR/nvm.sh"
 fi
-NODE_MAJOR=""
-if command_exists node; then
-    NODE_MAJOR=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
+
+if node_runtime_ready; then
+    echo -e "${GREEN}Compatible Node.js and npm already available — skipping NVM installation.${NC}"
+else
+    if ! runtime_platform_supported; then
+        echo -e "${RED}The bundled Node.js runtime requires x86_64 and glibc 2.28 or newer; no compatible runtime is prepared for this host.${NC}"
+        exit 1
+    fi
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo -e "${YELLOW}Installing NVM from the bundled offline archive...${NC}"
+        if ! download_runtime_assets; then
+            echo -e "${RED}Cannot install NVM because the bundled runtime assets failed verification.${NC}"
+            exit 1
+        fi
+        mkdir -p "$NVM_DIR"
+        tar -xzf "$NVM_ARCHIVE" --strip-components=1 -C "$NVM_DIR"
+    fi
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        echo -e "${RED}NVM was not found after extracting the bundled archive.${NC}"
+        exit 1
+    fi
+    . "$NVM_DIR/nvm.sh"
+
+    if ! node_runtime_ready; then
+        echo -e "${YELLOW}Installing Node.js $TARGET_NODE_VERSION from the bundled archive...${NC}"
+        if ! download_runtime_assets || [ ! -s "$NODE_ARCHIVE" ]; then
+            echo -e "${RED}Bundled Node.js runtime assets are incomplete or invalid.${NC}"
+            exit 1
+        fi
+        command_exists nvm || { echo -e "${RED}NVM is not available after loading its bundled installation.${NC}"; exit 1; }
+        NODE_VERSION_DIR="$NVM_DIR/versions/node/v$TARGET_NODE_VERSION"
+        if [ ! -x "$NODE_VERSION_DIR/bin/node" ] || [ ! -x "$NODE_VERSION_DIR/bin/npm" ]; then
+            mkdir -p "$NODE_VERSION_DIR"
+            tar -xf "$NODE_ARCHIVE" --strip-components=1 -C "$NODE_VERSION_DIR"
+        fi
+        if [ ! -x "$NODE_VERSION_DIR/bin/node" ] || [ ! -x "$NODE_VERSION_DIR/bin/npm" ]; then
+            echo -e "${RED}Bundled Node.js archive did not contain a usable Node.js/npm runtime.${NC}"
+            exit 1
+        fi
+        nvm use "$TARGET_NODE_VERSION"
+        nvm alias default "$TARGET_NODE_VERSION"
+    fi
 fi
-if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 20 ]; then
-    echo -e "${YELLOW}Installing Node.js 24...${NC}"
-    command_exists nvm || { echo -e "${RED}NVM is not available.${NC}"; exit 1; }
-    nvm install 24
-    nvm use 24
-    nvm alias default 24
+
+if ! node_runtime_ready; then
+    echo -e "${RED}Node.js 20+ and npm are required, but a compatible runtime is unavailable.${NC}"
+    exit 1
 fi
 echo -e "${GREEN}Using Node.js $(node --version) and npm $(npm --version)${NC}"
 
@@ -203,7 +558,31 @@ if [ ! -f package.json ] || [ ! -f package-lock.json ]; then
     exit 1
 fi
 echo -e "${YELLOW}Installing NestJS backend dependencies...${NC}"
-npm ci
+NPM_CACHE_ARCHIVE="$RUNTIME_ASSET_DIR/npm-cache-linux-x64.tar.gz"
+if [ ! -s "$NPM_CACHE_ARCHIVE" ]; then
+    download_runtime_assets || echo -e "${YELLOW}VoIPiran npm cache is unavailable; the configured npm registry will be used.${NC}"
+fi
+if [ -s "$NPM_CACHE_ARCHIVE" ]; then
+    if ! verify_runtime_assets; then
+        echo -e "${RED}Cannot use the bundled npm cache because runtime asset verification failed.${NC}"
+        exit 1
+    fi
+    NPM_CACHE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-npm-cache.XXXXXX")
+    if ! tar -xzf "$NPM_CACHE_ARCHIVE" -C "$NPM_CACHE_DIR"; then
+        rm -rf "$NPM_CACHE_DIR"
+        echo -e "${RED}Failed to extract the bundled npm cache.${NC}"
+        exit 1
+    fi
+    if ! npm ci --offline --cache "$NPM_CACHE_DIR" --no-audit --no-fund; then
+        rm -rf "$NPM_CACHE_DIR"
+        echo -e "${RED}Offline NestJS dependency installation failed.${NC}"
+        exit 1
+    fi
+    rm -rf "$NPM_CACHE_DIR"
+else
+    echo -e "${YELLOW}Offline npm cache is missing; using the configured npm registry.${NC}"
+    npm ci
+fi
 echo -e "${YELLOW}Building NestJS backend...${NC}"
 npm run build
 if [ ! -f "$PROJECT_ROOT/backend/dist/main.js" ]; then
@@ -217,9 +596,13 @@ echo -e "\n${YELLOW}Step 5: Installing Python ...${NC}"
 PYTHON_NEEDS_UPGRADE=false
 PYTHON_11_PLUS_PATH=""
 PYTHON_11_PLUS_FOUND=false
+PYTHON_VERSIONS=("3.13" "3.12" "3.11")
+if [[ -f /etc/issabel.conf ]]; then
+    PYTHON_VERSIONS=("3.11")
+fi
 
 # Check for Python 3.11+ versions
-for PYTHON_VER in "3.13" "3.12" "3.11"; do
+for PYTHON_VER in "${PYTHON_VERSIONS[@]}"; do
     if command_exists python${PYTHON_VER}; then
         PYTHON_11_PLUS_FOUND=true
         PYTHON_11_PLUS_VERSION=$PYTHON_VER
@@ -410,6 +793,8 @@ else
 fi
 
 echo -e "${GREEN}Python and pip installation completed successfully. Continuing with next steps...${NC}"
+
+prepare_contactcenter_python_wheels
 
 # --- Step 6: PBX & Database Config ---
 echo -e "\n${YELLOW}Step 6: Detecting PBX Environment & Configuring Database...${NC}"
@@ -642,10 +1027,8 @@ cd "$PROJECT_ROOT/backend"
 
 # VAD is the only remaining Python component. The application backend is
 # NestJS, so the legacy root-level requirements.txt must not be installed.
-# PyPI downloads can be slow on PBX hosts; use retries for transient stalls.
+# Prefer the bundled wheels so VAD setup does not require PyPI access.
 PIP_INSTALL_OPTIONS=(
-    --retries 10
-    --timeout 120
     --prefer-binary
     --disable-pip-version-check
 )
@@ -656,19 +1039,102 @@ if [ ! -f "$VAD_REQUIREMENTS" ]; then
     exit 1
 fi
 
+VAD_WHEEL_DIR="$OFFLINE_ASSET_ROOT/contactcenter-vad-wheels"
+CONTACTCENTER_WHEEL_DIR="${CONTACTCENTER_WHEEL_DIR:-$OFFLINE_ASSET_ROOT/contactcenter-wheels}"
+VAD_WHEEL_TEMP=false
+if [ ! -s "$VAD_WHEEL_DIR/manifest.txt" ]; then
+    VAD_WHEEL_BASE_URL="https://voipiran.io/clover/contactcenter-vad-wheels"
+    VAD_WHEEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-vad-wheels.XXXXXX")
+    if curl -fsSL --connect-timeout 15 --max-time 120 \
+        "$VAD_WHEEL_BASE_URL/manifest.txt" -o "$VAD_WHEEL_DIR/manifest.txt"; then
+        VAD_WHEEL_TEMP=true
+        while IFS= read -r wheel_file || [ -n "$wheel_file" ]; do
+            wheel_file=$(echo "$wheel_file" | tr -d '\r')
+            [[ -z "$wheel_file" || "$wheel_file" =~ ^# ]] && continue
+            if [[ "$wheel_file" != "$(basename "$wheel_file")" || "$wheel_file" != *.whl ]]; then
+                echo -e "${RED}Invalid VAD wheel manifest entry: $wheel_file${NC}"
+                rm -rf "$VAD_WHEEL_DIR"
+                exit 1
+            fi
+            if ! curl -fsSL --connect-timeout 15 --max-time 120 \
+                "$VAD_WHEEL_BASE_URL/$wheel_file" -o "$VAD_WHEEL_DIR/$wheel_file"; then
+                echo -e "${RED}Failed to download VAD wheel: $wheel_file${NC}"
+                rm -rf "$VAD_WHEEL_DIR"
+                exit 1
+            fi
+        done < "$VAD_WHEEL_DIR/manifest.txt"
+        if curl -fsSL --connect-timeout 15 --max-time 120 \
+            "$VAD_WHEEL_BASE_URL/SHA256SUMS" -o "$VAD_WHEEL_DIR/SHA256SUMS" 2>/dev/null; then
+            if ! verify_sha256sums "$VAD_WHEEL_DIR"; then
+                echo -e "${RED}Downloaded VAD wheel checksum verification failed.${NC}"
+                rm -rf "$VAD_WHEEL_DIR"
+                exit 1
+            fi
+        else
+            echo -e "${YELLOW}VoIPiran has not published VAD wheel checksums; HTTPS was used for download.${NC}"
+        fi
+    else
+        rm -rf "$VAD_WHEEL_DIR"
+        VAD_WHEEL_DIR=""
+    fi
+fi
+
+if [ -n "$VAD_WHEEL_DIR" ] && [ -s "$VAD_WHEEL_DIR/manifest.txt" ]; then
+    if [[ -f /etc/issabel.conf && ! -s "$VAD_WHEEL_DIR/SHA256SUMS" ]]; then
+        echo -e "${RED}VAD wheel checksums are required for an Issabel offline installation.${NC}"
+        exit 1
+    fi
+    if [ -s "$VAD_WHEEL_DIR/SHA256SUMS" ] &&
+        ! verify_sha256sums "$VAD_WHEEL_DIR"; then
+        echo -e "${RED}Bundled VAD wheel verification failed.${NC}"
+        exit 1
+    fi
+    PIP_INSTALL_OPTIONS+=(--find-links "$VAD_WHEEL_DIR")
+    if [ -d "$CONTACTCENTER_WHEEL_DIR" ]; then
+        if [ -s "$CONTACTCENTER_WHEEL_DIR/SHA256SUMS" ] &&
+            ! verify_sha256sums "$CONTACTCENTER_WHEEL_DIR"; then
+            echo -e "${RED}Bundled ContactCenter wheel verification failed.${NC}"
+            exit 1
+        fi
+        PIP_INSTALL_OPTIONS+=(--no-index --find-links "$CONTACTCENTER_WHEEL_DIR")
+    elif "$FINAL_PYTHON_PATH" -c 'import numpy, onnxruntime' >/dev/null 2>&1; then
+        PIP_INSTALL_OPTIONS+=(--no-index)
+    else
+        echo -e "${YELLOW}ContactCenter wheels are unavailable; missing VAD dependencies may use the configured Python package index.${NC}"
+        PIP_INSTALL_OPTIONS+=(--retries 10 --timeout 120)
+    fi
+else
+    if [[ -f /etc/issabel.conf ]]; then
+        echo -e "${RED}VAD wheel bundle is unavailable; refusing an online Python package-index fallback on Issabel.${NC}"
+        exit 1
+    fi
+    echo -e "${YELLOW}Bundled VAD wheels are missing; using the configured Python package index.${NC}"
+    PIP_INSTALL_OPTIONS+=(--retries 10 --timeout 120)
+fi
+
 # Only use --break-system-packages on Debian/Ubuntu systems.
 if [ "$OS" == "debian" ] || [ "$OS" == "ubuntu" ]; then
     echo -e "${YELLOW}Installing VAD Python dependencies (Debian/Ubuntu)...${NC}"
     if ! "$FINAL_PYTHON_PATH" -m pip install "${PIP_INSTALL_OPTIONS[@]}" --break-system-packages -r "$VAD_REQUIREMENTS"; then
+        if [ "$VAD_WHEEL_TEMP" == "true" ]; then
+            rm -rf "$VAD_WHEEL_DIR"
+        fi
         echo -e "${RED}Python dependency installation failed.${NC}"
         exit 1
     fi
 else
     echo -e "${YELLOW}Installing VAD Python dependencies (non-Debian system)...${NC}"
     if ! "$FINAL_PYTHON_PATH" -m pip install "${PIP_INSTALL_OPTIONS[@]}" -r "$VAD_REQUIREMENTS"; then
+        if [ "$VAD_WHEEL_TEMP" == "true" ]; then
+            rm -rf "$VAD_WHEEL_DIR"
+        fi
         echo -e "${RED}Python dependency installation failed.${NC}"
         exit 1
     fi
+fi
+
+if [ "$VAD_WHEEL_TEMP" == "true" ]; then
+    rm -rf "$VAD_WHEEL_DIR"
 fi
 
 # Generate or reuse OpDesk HTTPS certificate (for backend and optional Asterisk)
@@ -1021,10 +1487,82 @@ if ! command_exists nginx; then
     if [ "$OS" == "debian" ] || [ "$OS" == "ubuntu" ]; then
         sudo apt-get update -qq && sudo apt-get install -y nginx
     elif [[ "$OS" =~ (centos|rhel|rocky|fedora) ]]; then
-        sudo dnf install -y nginx || sudo yum install -y nginx
+        if [[ "${VERSION_ID%%.*}" == "8" && "$(uname -m)" == "x86_64" ]]; then
+            NGINX_RPM_DIR="$OFFLINE_ASSET_ROOT/nginx-rpms"
+            NGINX_FS_RPM="nginx-filesystem-1.14.1-9.module+el8.4.0+542+81547229.noarch.rpm"
+            NGINX_RPM="nginx-1.14.1-9.module+el8.4.0+542+81547229.x86_64.rpm"
+            NGINX_RPM_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-nginx.XXXXXX")
+            INSTALLER_TEMP_DIRS+=("$NGINX_RPM_TEMP")
+
+            if [[ -s "$NGINX_RPM_DIR/$NGINX_FS_RPM" && -s "$NGINX_RPM_DIR/$NGINX_RPM" ]]; then
+                if ! verify_sha256sums "$NGINX_RPM_DIR"; then
+                    echo -e "${RED}Bundled nginx RPM checksum verification failed.${NC}"
+                    exit 1
+                fi
+                cp "$NGINX_RPM_DIR/$NGINX_FS_RPM" "$NGINX_RPM_DIR/$NGINX_RPM" "$NGINX_RPM_TEMP/"
+            else
+                NGINX_RPM_BASE_URL="https://voipiran.io/clover/nginx-rpms"
+                for package in "$NGINX_FS_RPM" "$NGINX_RPM"; do
+                    if ! curl -fsSL --connect-timeout 15 --max-time 300 \
+                        "$NGINX_RPM_BASE_URL/$package" -o "$NGINX_RPM_TEMP/$package"; then
+                        echo -e "${RED}Failed to download nginx RPM: $package${NC}"
+                        exit 1
+                    fi
+                done
+                if curl -fsSL --connect-timeout 15 --max-time 120 \
+                    "$NGINX_RPM_BASE_URL/SHA256SUMS" -o "$NGINX_RPM_TEMP/SHA256SUMS"; then
+                    if ! verify_sha256sums "$NGINX_RPM_TEMP"; then
+                        echo -e "${RED}Downloaded nginx RPM checksum verification failed.${NC}"
+                        exit 1
+                    fi
+                else
+                    echo -e "${YELLOW}nginx RPM checksums are not published; downloads came from the VoIPiran HTTPS mirror.${NC}"
+                fi
+            fi
+
+            if command_exists dnf; then
+                sudo dnf install -y --disablerepo="*" "$NGINX_RPM_TEMP/$NGINX_FS_RPM"
+            else
+                sudo yum install -y --disablerepo="*" "$NGINX_RPM_TEMP/$NGINX_FS_RPM"
+            fi
+            if ! rpm -q nginx >/dev/null 2>&1; then
+                sudo rpm -Uvh --nodeps "$NGINX_RPM_TEMP/$NGINX_RPM"
+            fi
+        elif command_exists dnf; then
+            sudo dnf install -y nginx
+        else
+            sudo yum install -y nginx
+        fi
     fi
 fi
+if ! command_exists nginx || ! id nginx >/dev/null 2>&1; then
+    echo -e "${RED}Nginx or its system user is missing after installation.${NC}"
+    exit 1
+fi
 sudo systemctl enable nginx 2>/dev/null || true
+
+PHP_POOL="/etc/opt/remi/php83/php-fpm.d/www.conf"
+if [[ ! -f "$PHP_POOL" && -f "${PHP_POOL}.bak" ]]; then
+    sudo cp -f "${PHP_POOL}.bak" "$PHP_POOL"
+fi
+if [[ -f "$PHP_POOL" ]]; then
+    sudo sed -i \
+        -e 's|^user = .*|user = nginx|' \
+        -e 's|^group = .*|group = nginx|' \
+        -e 's|^listen = .*|listen = /var/opt/remi/php83/run/php-fpm/www.sock|' \
+        -e 's|^[[:space:]]*listen\.acl_users[[:space:]]*=.*|;listen.acl_users =|' \
+        -e 's|^[[:space:]]*listen\.acl_groups[[:space:]]*=.*|;listen.acl_groups =|' \
+        -e '/^listen\.allowed_clients/d' \
+        -e '/^listen\.owner/d' \
+        -e '/^listen\.group/d' \
+        -e '/^listen\.mode/d' \
+        "$PHP_POOL"
+    sudo grep -q '^listen.owner' "$PHP_POOL" || echo "listen.owner = nginx" | sudo tee -a "$PHP_POOL" >/dev/null
+    sudo grep -q '^listen.group' "$PHP_POOL" || echo "listen.group = nginx" | sudo tee -a "$PHP_POOL" >/dev/null
+    sudo grep -q '^listen.mode' "$PHP_POOL" || echo "listen.mode = 0660" | sudo tee -a "$PHP_POOL" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable php83-php-fpm nginx
+fi
 
 # Public-domain mode: obtain or reuse Let's Encrypt cert
 if [ -n "$OPDESK_DOMAIN" ]; then
@@ -1466,6 +2004,31 @@ else
         echo -e "${YELLOW}Restarting OpDesk service to apply update...${NC}"
         sudo systemctl restart opdesk.service
         echo -e "${GREEN}OpDesk service restarted.${NC}"
+    fi
+fi
+
+if [[ -f /etc/issabel.conf ]]; then
+    PATCH_SCRIPT="$VOIPIRAN_SOURCE_ROOT/voipiran-patch/apply.sh"
+    if [[ ! -f "$PATCH_SCRIPT" ]]; then
+        echo -e "${RED}Issabel customization script is missing: $PATCH_SCRIPT${NC}"
+        exit 1
+    fi
+    echo -e "${YELLOW}Applying VOIPIRAN Issabel customizations...${NC}"
+    if ! bash "$PATCH_SCRIPT"; then
+        echo -e "${RED}VOIPIRAN Issabel customizations failed.${NC}"
+        exit 1
+    fi
+
+    configure_issabel_chanspy
+    if ! sudo systemctl reload asterisk; then
+        if ! sudo asterisk -rx "dialplan reload"; then
+            echo -e "${RED}Could not reload the Issabel Asterisk dialplan.${NC}"
+            exit 1
+        fi
+    fi
+    if ! sudo systemctl restart httpd; then
+        echo -e "${RED}Could not restart the Issabel HTTP service after applying customizations.${NC}"
+        exit 1
     fi
 fi
 

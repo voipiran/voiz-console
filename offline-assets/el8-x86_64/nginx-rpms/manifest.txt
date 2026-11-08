@@ -1,0 +1,2 @@
+nginx-filesystem-1.14.1-9.module+el8.4.0+542+81547229.noarch.rpm
+nginx-1.14.1-9.module+el8.4.0+542+81547229.x86_64.rpm

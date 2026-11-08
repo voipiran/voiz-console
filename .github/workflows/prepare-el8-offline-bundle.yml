@@ -1,0 +1,63 @@
+name: Prepare EL8 offline bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Console
+        uses: actions/checkout@v4
+
+      - name: Resolve and test Rocky 8 RPM dependencies
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/voiz-console-assets"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$RUNNER_TEMP/voiz-console-assets:/output" \
+            -w /workspace \
+            rockylinux:8 \
+            bash -lc '
+              set -euo pipefail
+              dnf install -y dnf-plugins-core python3.11 python3.11-pip tar gzip
+              bash scripts/prepare-offline-assets.sh /output
+              dnf install -y --disablerepo="*" /output/el8-x86_64/contactcenter-rpms/*.rpm
+              rpm --test --nodeps -Uvh /output/el8-x86_64/nginx-rpms/nginx-*.rpm
+            '
+
+      - name: Build uploadable Console archive
+        shell: bash
+        run: |
+          asset_root="$GITHUB_WORKSPACE/offline-assets/el8-x86_64"
+          generated_root="$RUNNER_TEMP/voiz-console-assets/el8-x86_64"
+          rm -rf "$asset_root"
+          mkdir -p "$asset_root"
+          cp -a "$generated_root/." "$asset_root/"
+
+          repo_name="$(basename "$GITHUB_WORKSPACE")"
+          archive="$RUNNER_TEMP/voiz-console.tar.gz"
+          tar -czf "$archive" \
+            --exclude='*/.git' \
+            --exclude='*/node_modules' \
+            --exclude='*/backend/dist' \
+            --exclude='*/contactcenter.sh' \
+            --exclude='*/contactcenter.sh.bak' \
+            -C "$(dirname "$GITHUB_WORKSPACE")" "$repo_name"
+          tar -tzf "$archive" | grep -Fx "$repo_name/install-console.sh"
+          tar -tzf "$archive" | grep -Fx "$repo_name/offline-assets/el8-x86_64/contactcenter-rpms/SHA256SUMS"
+          (cd "$RUNNER_TEMP" && sha256sum voiz-console.tar.gz > voiz-console.tar.gz.sha256)
+
+      - name: Upload tested archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiz-console-el8-offline
+          path: |
+            ${{ runner.temp }}/voiz-console.tar.gz
+            ${{ runner.temp }}/voiz-console.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
