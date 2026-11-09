@@ -53,21 +53,9 @@ import {
   Sun,
   Menu,
   X,
-<<<<<<< HEAD
-  Plug,
-  Signal,
-  ShieldCheck,
-  Smartphone,
-  Disc,
-  PauseCircle,
-  Terminal,
-  KeyRound,
-  UserCircle,
-=======
   ScrollText,
   BookUser,
   FileAudio,
->>>>>>> upstream/main
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Badge, EmptyState, Tabs } from './components/ui';
@@ -908,58 +896,6 @@ function App({ onLogout }: AppProps) {
 
         {/* ── Sidebar ── */}
         <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}${mobileNavOpen ? ' open' : ''}`}>
-<<<<<<< HEAD
-          <nav className="sidebar-nav">
-
-            <button className={`sidebar-item${activeTab === 'dashboard' ? ' active' : ''}`} onClick={() => selectTab('dashboard')} title={sidebarCollapsed ? t('nav.dashboard', 'Dashboard') : undefined}>
-              <Activity size={16} />{!sidebarCollapsed && t('nav.dashboard', 'Dashboard')}
-            </button>
-
-            <button className={`sidebar-item${activeTab === 'extensions' ? ' active' : ''}`} onClick={() => selectTab('extensions')} title={sidebarCollapsed ? t('nav.extensions') : undefined}>
-              <Phone size={16} />{!sidebarCollapsed && t('nav.extensions')}
-            </button>
-
-            <button className={`sidebar-item${activeTab === 'calls' ? ' active' : ''}`} onClick={() => selectTab('calls')} title={sidebarCollapsed ? t('nav.activeCalls') : undefined}>
-              <PhoneCall size={16} />{!sidebarCollapsed && t('nav.activeCalls')}
-              {stats.active_calls_count > 0 && (
-                <span className="sidebar-badge" style={{ background: 'var(--status-call)', color: 'var(--text-on-accent)' }}>{stats.active_calls_count}</span>
-              )}
-            </button>
-
-            {getUser()?.role !== 'agent' && (
-              <button className={`sidebar-item${activeTab === 'queues' ? ' active' : ''}`} onClick={() => selectTab('queues')} title={sidebarCollapsed ? t('nav.queues') : undefined}>
-                <Users size={16} />{!sidebarCollapsed && t('nav.queues')}
-                {stats.total_waiting > 0 && (
-                  <span className="sidebar-badge" style={{ background: 'var(--status-ringing)', color: 'var(--text-on-accent)' }}>{stats.total_waiting}</span>
-                )}
-              </button>
-            )}
-
-            <button className={`sidebar-item${activeTab === 'call-log' ? ' active' : ''}`} onClick={() => selectTab('call-log')} title={sidebarCollapsed ? t('nav.callHistory') : undefined}>
-              <History size={16} />{!sidebarCollapsed && t('nav.callHistory')}
-            </button>
-
-            {/* Contacts — everyone can browse; editing is admin-only inside the panel */}
-			{/*
-            <button className={`sidebar-item${activeTab === 'contacts' ? ' active' : ''}`} onClick={() => selectTab('contacts')} title={sidebarCollapsed ? t('nav.contacts', 'Contacts') : undefined}>
-              <BookUser size={16} />{!sidebarCollapsed && t('nav.contacts', 'Contacts')}
-            </button>
-			*/}
-
-            {getUser()?.role !== 'agent' && (
-              <button className={`sidebar-item${activeTab === 'analytics' ? ' active' : ''}`} onClick={() => selectTab('analytics')} title={sidebarCollapsed ? t('nav.analytics') : undefined}>
-                <BarChart3 size={16} />{!sidebarCollapsed && t('nav.analytics')}
-              </button>
-            )}
-
-            {getUser()?.role === 'admin' && (
-              <>
-                <div className="sidebar-divider" />
-
-                {/* Team collapsible group — admin only */}
-                {!sidebarCollapsed ? (
-                  <div className="sidebar-group">
-=======
           <nav className="sidebar-nav" aria-label={t('nav.main', 'Main navigation')}>
             {navGroups.map((g, gi) => (
               <div key={g.key} className="sidebar-section">
@@ -969,7 +905,6 @@ function App({ onLogout }: AppProps) {
                 {g.items.map((it) => {
                   const active = activeTab === it.tab || !!it.also?.includes(activeTab);
                   return (
->>>>>>> upstream/main
                     <button
                       key={it.tab}
                       type="button"

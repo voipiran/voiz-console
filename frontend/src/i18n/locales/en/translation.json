@@ -1,9 +1,5 @@
 {
   "app": {
-<<<<<<< HEAD
-    "title": "ContactCenter",
-    "subtitle": "ContactCenter Real-time Dashboard"
-=======
     "title": "OpDesk",
     "subtitle": "Asterisk PBX real-time monitor"
   },
@@ -14,7 +10,6 @@
     "es": "Spanish",
     "pt": "Portuguese",
     "uk": "Ukrainian"
->>>>>>> upstream/main
   },
 "language": {
   "select": "زبان",
@@ -33,9 +28,6 @@
     "analytics": "Analytics",
     "recordings": "Recordings",
     "openMenu": "Open menu",
-<<<<<<< HEAD
-    "closeMenu": "Close menu"
-=======
     "closeMenu": "Close menu",
     "logs": "Logs",
     "contacts": "Contacts",
@@ -49,7 +41,6 @@
     },
     "main": "Main navigation",
     "teams": "Teams"
->>>>>>> upstream/main
   },
   "header": {
     "softphoneRegistered": "Softphone (registered)",
@@ -79,12 +70,7 @@
     "waiting": "Waiting"
   },
   "login": {
-<<<<<<< HEAD
-    "title": "ContactCenter",
-    "subtitle": "ContactCenter Real-time Dashboard",
-=======
     "subtitle": "Asterisk operator panel",
->>>>>>> upstream/main
     "extensionLabel": "Extension or username",
     "extensionPlaceholder": "e.g. 1001 or admin",
     "signIn": "Sign in",
@@ -163,21 +149,14 @@
     "members": "Members ({{count}})",
     "addMember": "Add member",
     "extensionPlaceholder": "Extension (e.g., 100)",
-<<<<<<< HEAD
-=======
     "selectExtension": "Search extension or name…",
     "noExtensions": "No available extensions",
     "loginStatus": "Login status",
->>>>>>> upstream/main
     "namePlaceholder": "Name (optional)",
     "add": "Add",
     "noMembers": "No members in queue",
     "unpause": "Unpause",
     "removeStatic": "Cannot remove: Member is statically configured in queues.conf. Edit config and reload Asterisk to remove.",
-<<<<<<< HEAD
-    "removeDynamic": "Remove from Queue (Dynamic member)",
-    "removeCheck": "Remove from Queue (Will check if removable)"
-=======
     "removeDynamic": "Remove from queue (dynamic member)",
     "removeCheck": "Remove from queue (will check if removable)",
     "removeConfirm": "Remove {{member}} from queue {{queue}}?",
@@ -213,7 +192,6 @@
     "setNotReady": "Set Not Ready",
     "logoutTitle": "Log {{agent}} out?",
     "logoutConfirm": "{{agent}} leaves every queue and stops receiving queue calls."
->>>>>>> upstream/main
   },
   "callLog": {
     "viewManage": "View and manage call records",
@@ -229,12 +207,6 @@
     "showJourney": "Show call journey",
     "loading": "Loading call history...",
     "noCallsFound": "No calls found",
-<<<<<<< HEAD
-    "allStatuses": "All Statuses",
-    "allDirections": "All Directions",
-    "allApps": "All Apps",
-    "totalCalls": "Total Calls",
-=======
     "allApps": "All apps",
     "supervisionOff": "Supervision hidden",
     "supervisionShown": "Showing supervision",
@@ -244,7 +216,6 @@
       "BARGE": "BARGE"
     },
     "totalCalls": "Total calls",
->>>>>>> upstream/main
     "showing": "Showing {{start}} to {{end}} of {{total}} calls",
     "showingCapped": "Showing {{start}} to {{end}} of more than {{total}} calls",
     "previous": "Previous",
@@ -261,17 +232,6 @@
       "dateTime": "Date & time",
       "qos": "QOS"
     },
-<<<<<<< HEAD
-    "status": {
-      "completed": "Completed",
-      "failed": "Failed",
-      "no_answer": "No Answer",
-      "in_progress": "In Progress",
-      "busy": "Busy",
-      "switched_off": "Switched Off"
-    },
-=======
->>>>>>> upstream/main
     "direction": {
       "incoming": "Incoming",
       "outgoing": "Outgoing"
@@ -462,15 +422,12 @@
     "displayName": "Display name",
     "extension": "Extension (optional)",
     "noExtensions": "No extensions in system",
-<<<<<<< HEAD
-=======
     "webrtcLabel": "WebRTC softphone",
     "webrtcHint": "Let this extension register from the browser and the mobile app.",
     "webrtcSaveFailed": "User saved, but updating WebRTC failed.",
     "multiDeviceLabel": "Browser and phone at the same time",
     "multiDeviceHint": "Let this extension stay signed in on the web softphone and the mobile app at once (max contacts 2 instead of 1). Both ring, and answering on one stops the other. With this off, signing in on one signs the other out.",
     "multiDeviceSaveFailed": "User saved, but updating the device limit failed.",
->>>>>>> upstream/main
     "role": "Role",
     "monitorModes": "Monitor modes (select one or more)",
     "groupsLabel": "Groups (user gets access to agents and queues from selected groups)",
@@ -505,9 +462,6 @@
       "listen": "Listen",
       "whisper": "Whisper",
       "barge": "Barge"
-<<<<<<< HEAD
-    }
-=======
     },
     "searchLabel": "Search users",
     "searchPlaceholder": "Username, name, extension, group…",
@@ -519,7 +473,6 @@
     "sipPasswordHint": "What phones and softphones register with. Leave blank to keep the current one. Changing it signs out every phone on the extension.",
     "sipPasswordRule": "The SIP password needs 8 to 64 characters, with letters and digits, and no spaces or quotes.",
     "sipSaveFailed": "User saved, but changing the SIP password failed."
->>>>>>> upstream/main
   },
   "groups": {
     "title": "All groups",
@@ -552,9 +505,6 @@
     "groupUpdated": "Group updated",
     "groupCreated": "Group created",
     "groupDeleted": "Group deleted",
-<<<<<<< HEAD
-    "groupNameRequired": "Group name is required"
-=======
     "groupNameRequired": "Group name is required",
     "searchLabel": "Search groups",
     "searchPlaceholder": "Group, agent, queue, user…",
@@ -566,7 +516,6 @@
     "usersCount_one": "{{count}} user",
     "usersCount_other": "{{count}} users",
     "deleteTitle": "Delete group?"
->>>>>>> upstream/main
   },
   "supervisor": {
     "listen": {
@@ -620,9 +569,6 @@
       "verifySSL": "Verify SSL certificates",
       "savedSuccess": "CRM configuration saved successfully",
       "loadError": "Failed to load CRM configuration",
-<<<<<<< HEAD
-      "saveError": "Failed to save CRM configuration"
-=======
       "loadFailed": "The CRM settings could not be loaded. Saving is off so the stored settings are not overwritten.",
       "loadFailedSave": "The saved settings could not be loaded, so saving is off.",
       "notActive": "CRM is enabled but not active: {{reason}}. Calls are logged as failed deliveries until this is fixed.",
@@ -782,7 +728,6 @@
       "syncToggle": "Push call records to the CRM",
       "testFailed": "Connection test failed",
       "testOk": "Connection successful"
->>>>>>> upstream/main
     },
     "qos": {
       "title": "Quality of service (QoS)",
@@ -1105,19 +1050,6 @@
     "empty": "No data for this period",
     "nav": {
       "overview": "Overview",
-<<<<<<< HEAD
-      "queues": "Queue Performance",
-      "agents": "Agent Performance",
-      "drilldown": "Drilldown"
-    },
-    "period": {
-      "today": "Today",
-      "yesterday": "Yesterday",
-      "last7": "Last 7 Days",
-      "last30": "Last 30 Days",
-      "thisMonth": "This Month",
-      "custom": "Custom"
-=======
       "queues": "Queue performance",
       "agents": "Agent performance",
       "adherence": "Adherence",
@@ -1129,7 +1061,6 @@
       "thisMonth": "This month",
       "custom": "Custom",
       "label": "Date range"
->>>>>>> upstream/main
     },
     "kpi": {
       "slaDesc": "Calls answered within threshold",
@@ -1199,12 +1130,7 @@
       "page": "Page",
       "exportCsv": "Export CSV",
       "exportXlsx": "Export XLSX",
-<<<<<<< HEAD
-      "exporting": "Exporting...",
-      "clearFilters": "Clear"
-=======
       "exportCapped": "An export holds the first {{cap}} of these {{total}} calls. Narrow the range or the filters to export the rest."
->>>>>>> upstream/main
     },
     "settings": {
       "slaSection": "SLA thresholds",
