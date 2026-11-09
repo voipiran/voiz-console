@@ -4,6 +4,35 @@
 # OpDesk System Unified Installation Script 
 # Restoration: Original Python Logic + User-Preferred Summary
 # =================================================================
+# INSTALL ASSET SOURCE SETTINGS
+# "local" (default): use the adjacent offline-assets/el8-x86_64 directory.
+# "remote": download the same asset tree from the website; offline-assets
+# does not need to be shipped alongside the installer in this mode.
+# Missing files never switch automatically to the other source. Add missing
+# assets to the source selected here. Public repositories are only last-resort
+# fallbacks where the installer already has a sensible package-manager path.
+INSTALL_ASSET_SOURCE="local" # Default source; allowed values: local or remote.
+# Usage: ./install-console.sh [local|remote]
+# Alternative: ./install-console.sh --asset-source remote
+if [[ "${1:-}" == "--asset-source" ]]; then
+    if [[ $# -ne 2 ]]; then
+        echo "Usage: $0 [local|remote]  (or: $0 --asset-source local|remote)" >&2
+        exit 2
+    fi
+    INSTALL_ASSET_SOURCE="$2"
+elif [[ $# -gt 1 ]]; then
+    echo "Usage: $0 [local|remote]  (or: $0 --asset-source local|remote)" >&2
+    exit 2
+elif [[ $# -eq 1 ]]; then
+    INSTALL_ASSET_SOURCE="$1"
+fi
+case "$INSTALL_ASSET_SOURCE" in
+    local|remote) ;;
+    *) echo "Invalid asset source '$INSTALL_ASSET_SOURCE'. Use local or remote." >&2; exit 2 ;;
+esac
+INSTALL_ASSET_BASE_URL="https://voipiran.io/clover/offline-assets/el8-x86_64"
+# =================================================================
+# =================================================================
 
 set -e  # Exit on error
 
@@ -16,6 +45,42 @@ NC='\033[0m'
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VOIPIRAN_SOURCE_ROOT="$INSTALLER_DIR"
 OFFLINE_ASSET_ROOT="$INSTALLER_DIR/offline-assets/el8-x86_64"
+ASSET_CACHE_ROOT="${TMPDIR:-/tmp}/voiz-console-assets"
+
+validate_asset_source() {
+    case "$INSTALL_ASSET_SOURCE" in
+        local) ;;
+        remote) ;;
+        *) echo -e "${RED}INSTALL_ASSET_SOURCE must be local or remote.${NC}"; exit 1 ;;
+    esac
+}
+
+asset_source_path() {
+    local relative_path="$1"
+    if [[ "$INSTALL_ASSET_SOURCE" == "local" ]]; then
+        printf '%s/%s' "$OFFLINE_ASSET_ROOT" "$relative_path"
+    else
+        printf '%s/%s' "$ASSET_CACHE_ROOT" "$relative_path"
+    fi
+}
+
+ensure_asset_file() {
+    local relative_path="$1" target
+    target=$(asset_source_path "$relative_path")
+    if [[ "$INSTALL_ASSET_SOURCE" == "remote" && ! -s "$target" ]]; then
+        mkdir -p "$(dirname "$target")"
+        if ! curl -fsSL --connect-timeout 15 --max-time 300 \
+            "$INSTALL_ASSET_BASE_URL/$relative_path" -o "$target"; then
+            rm -f "$target"
+            echo -e "${RED}Selected remote asset is missing: $relative_path${NC}"
+            return 1
+        fi
+    fi
+    [[ -s "$target" ]] || { echo -e "${RED}Selected $INSTALL_ASSET_SOURCE asset is missing: $relative_path${NC}"; return 1; }
+    printf '%s' "$target"
+}
+
+validate_asset_source
 INSTALLER_TEMP_DIRS=()
 
 cleanup_installer_temp_dirs() {
@@ -57,9 +122,13 @@ install_issabel_rpm_dependencies() {
     local rpm_dir local_rpm_dir rpm_file
     rpm_dir=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-rpms.XXXXXX")
     INSTALLER_TEMP_DIRS+=("$rpm_dir")
-    local_rpm_dir="$OFFLINE_ASSET_ROOT/contactcenter-rpms"
+    local_rpm_dir="$(asset_source_path contactcenter-rpms)"
 
-    if [[ -s "$local_rpm_dir/manifest.txt" ]]; then
+    if [[ "$INSTALL_ASSET_SOURCE" == "local" && ! -s "$local_rpm_dir/manifest.txt" ]]; then
+        echo -e "${RED}ContactCenter RPM manifest is missing from the selected local source: $local_rpm_dir${NC}"
+        return 1
+    fi
+    if [[ -s "$local_rpm_dir/manifest.txt" && "$INSTALL_ASSET_SOURCE" == "local" ]]; then
         echo -e "${YELLOW}Using bundled ContactCenter RPM packages...${NC}"
         cp -a "$local_rpm_dir/." "$rpm_dir/"
         if ! verify_sha256sums "$rpm_dir"; then
@@ -68,8 +137,9 @@ install_issabel_rpm_dependencies() {
         fi
     else
         echo -e "${YELLOW}Downloading ContactCenter RPMs from the VoIPiran mirror...${NC}"
+        echo "Downloading: contactcenter-rpms/manifest.txt"
         if ! curl -fsSL --connect-timeout 15 --max-time 120 \
-            https://voipiran.io/clover/contactcenter-rpms/manifest.txt \
+            ${INSTALL_ASSET_BASE_URL}/contactcenter-rpms/manifest.txt \
             -o "$rpm_dir/manifest.txt"; then
             echo -e "${RED}Failed to download the ContactCenter RPM manifest.${NC}"
             return 1
@@ -82,8 +152,9 @@ install_issabel_rpm_dependencies() {
                 echo -e "${RED}Invalid RPM manifest entry: $rpm_file${NC}"
                 return 1
             fi
+            echo "Downloading: contactcenter-rpms/$rpm_file"
             if ! curl -fsSL --connect-timeout 15 --max-time 300 \
-                "https://voipiran.io/clover/contactcenter-rpms/$rpm_file" \
+                "${INSTALL_ASSET_BASE_URL}/contactcenter-rpms/$rpm_file" \
                 -o "$rpm_dir/$rpm_file"; then
                 echo -e "${RED}Failed to download ContactCenter RPM: $rpm_file${NC}"
                 return 1
@@ -91,7 +162,7 @@ install_issabel_rpm_dependencies() {
         done < "$rpm_dir/manifest.txt"
 
         if curl -fsSL --connect-timeout 15 --max-time 120 \
-            https://voipiran.io/clover/contactcenter-rpms/SHA256SUMS \
+            ${INSTALL_ASSET_BASE_URL}/contactcenter-rpms/SHA256SUMS \
             -o "$rpm_dir/SHA256SUMS"; then
             if ! verify_sha256sums "$rpm_dir"; then
                 echo -e "${RED}Downloaded ContactCenter RPM checksum verification failed.${NC}"
@@ -125,16 +196,21 @@ prepare_contactcenter_python_wheels() {
     [[ -f /etc/issabel.conf ]] || return 0
 
     local wheel_file
-    local local_wheel_dir="$OFFLINE_ASSET_ROOT/contactcenter-wheels"
+    local local_wheel_dir="$(asset_source_path contactcenter-wheels)"
     CONTACTCENTER_WHEEL_DIR="$local_wheel_dir"
 
+    if [[ "$INSTALL_ASSET_SOURCE" == "local" && ! -s "$CONTACTCENTER_WHEEL_DIR/manifest.txt" ]]; then
+        echo -e "${RED}ContactCenter wheel manifest is missing from the selected local source: $CONTACTCENTER_WHEEL_DIR${NC}"
+        return 1
+    fi
     if [[ ! -s "$CONTACTCENTER_WHEEL_DIR/manifest.txt" ]]; then
         CONTACTCENTER_WHEEL_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-wheels.XXXXXX")
         INSTALLER_TEMP_DIRS+=("$CONTACTCENTER_WHEEL_TEMP")
         CONTACTCENTER_WHEEL_DIR="$CONTACTCENTER_WHEEL_TEMP"
         echo -e "${YELLOW}Downloading ContactCenter Python wheels from the VoIPiran mirror...${NC}"
+        echo "Downloading: contactcenter-wheels/manifest.txt"
         if ! curl -fsSL --connect-timeout 15 --max-time 120 \
-            https://voipiran.io/clover/contactcenter-wheels/manifest.txt \
+            ${INSTALL_ASSET_BASE_URL}/contactcenter-wheels/manifest.txt \
             -o "$CONTACTCENTER_WHEEL_DIR/manifest.txt"; then
             echo -e "${RED}Failed to download the ContactCenter wheel manifest.${NC}"
             return 1
@@ -147,8 +223,9 @@ prepare_contactcenter_python_wheels() {
                 echo -e "${RED}Invalid ContactCenter wheel manifest entry: $wheel_file${NC}"
                 return 1
             fi
+            echo "Downloading: contactcenter-wheels/$wheel_file"
             if ! curl -fsSL --connect-timeout 15 --max-time 300 \
-                "https://voipiran.io/clover/contactcenter-wheels/$wheel_file" \
+                "${INSTALL_ASSET_BASE_URL}/contactcenter-wheels/$wheel_file" \
                 -o "$CONTACTCENTER_WHEEL_DIR/$wheel_file"; then
                 echo -e "${RED}Failed to download ContactCenter wheel: $wheel_file${NC}"
                 return 1
@@ -156,7 +233,7 @@ prepare_contactcenter_python_wheels() {
         done < "$CONTACTCENTER_WHEEL_DIR/manifest.txt"
 
         if curl -fsSL --connect-timeout 15 --max-time 120 \
-            https://voipiran.io/clover/contactcenter-wheels/SHA256SUMS \
+            ${INSTALL_ASSET_BASE_URL}/contactcenter-wheels/SHA256SUMS \
             -o "$CONTACTCENTER_WHEEL_DIR/SHA256SUMS"; then
             if ! verify_sha256sums "$CONTACTCENTER_WHEEL_DIR"; then
                 echo -e "${RED}Downloaded ContactCenter wheel checksum verification failed.${NC}"
@@ -424,20 +501,34 @@ NVM_SERVICE_USER="${SUDO_USER:-$USER}"
 NVM_SERVICE_HOME=$(getent passwd "$NVM_SERVICE_USER" 2>/dev/null | cut -d: -f6 || true)
 NVM_SERVICE_HOME="${NVM_SERVICE_HOME:-$HOME}"
 export NVM_DIR="${NVM_DIR:-$NVM_SERVICE_HOME/.nvm}"
-RUNTIME_ASSET_DIR="$VOIPIRAN_SOURCE_ROOT/offline-assets/el8-x86_64/contactcenter-runtime"
-RUNTIME_ASSET_BASE_URL="https://voipiran.io/clover/contactcenter-runtime"
+RUNTIME_ASSET_DIR="$(asset_source_path contactcenter-runtime)"
+RUNTIME_ASSET_BASE_URL="${INSTALL_ASSET_BASE_URL}/contactcenter-runtime"
 NVM_ARCHIVE="$RUNTIME_ASSET_DIR/nvm-v0.40.3.tar.gz"
 NODE_ARCHIVE="$RUNTIME_ASSET_DIR/nodejs/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz"
 TARGET_NODE_VERSION="24.22.2"
 
 verify_runtime_assets() {
-    if [ ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ]; then
+    local expected_hash relative_path actual_hash
+    if [[ ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ]]; then
         echo -e "${RED}Offline runtime checksum file is missing: $RUNTIME_ASSET_DIR/SHA256SUMS${NC}"
         return 1
     fi
-    verify_sha256sums "$RUNTIME_ASSET_DIR"
-}
 
+    while read -r expected_hash relative_path || [[ -n "$expected_hash" ]]; do
+        expected_hash="${expected_hash//$'\r'/}"
+        relative_path="${relative_path//$'\r'/}"
+        [[ -z "$expected_hash" ]] && continue
+        [[ -s "$RUNTIME_ASSET_DIR/$relative_path" ]] || return 1
+        actual_hash=$(sha256sum "$RUNTIME_ASSET_DIR/$relative_path" | awk '{print $1}')
+        if [[ "$actual_hash" != "$expected_hash" && ( "$relative_path" == "nodejs/dist/index.tab" || "$relative_path" == "nodejs/dist/v24.22.2/SHASUMS256.txt" ) ]]; then
+            actual_hash=$(tr -d '\r' < "$RUNTIME_ASSET_DIR/$relative_path" | sha256sum | awk '{print $1}')
+        fi
+        if [[ "$actual_hash" != "$expected_hash" ]]; then
+            echo -e "${RED}Runtime checksum failed: $relative_path${NC}"
+            return 1
+        fi
+    done < "$RUNTIME_ASSET_DIR/SHA256SUMS"
+}
 runtime_platform_supported() {
     local machine glibc_version glibc_major glibc_minor
     machine=$(uname -m)
@@ -454,6 +545,10 @@ runtime_platform_supported() {
 download_runtime_assets() {
     local relative_path expected_hash
     mkdir -p "$RUNTIME_ASSET_DIR"
+    if [[ "$INSTALL_ASSET_SOURCE" == "local" && ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ]]; then
+        echo -e "${RED}Runtime manifest missing from selected local source: $RUNTIME_ASSET_DIR/SHA256SUMS${NC}"
+        return 1
+    fi
     if [ ! -s "$RUNTIME_ASSET_DIR/SHA256SUMS" ] &&
         ! curl -fsSL --connect-timeout 15 --max-time 120 \
             "$RUNTIME_ASSET_BASE_URL/SHA256SUMS" \
@@ -463,14 +558,22 @@ download_runtime_assets() {
     fi
 
     while read -r expected_hash relative_path || [ -n "$expected_hash" ]; do
+        expected_hash="${expected_hash//$'\r'/}"
+        relative_path="${relative_path//$'\r'/}"
         [[ -z "$expected_hash" || "$expected_hash" =~ ^# ]] && continue
-        if [[ ! "$expected_hash" =~ ^[[:xdigit:]]{64}$ ||
-            ! "$relative_path" =~ ^[A-Za-z0-9._/-]+$ ||
-            "$relative_path" == *".."* ]]; then
-            echo -e "${RED}Invalid entry in the bundled runtime manifest: $relative_path${NC}"
+        if [[ ${#expected_hash} -ne 64 ]] ||
+            [[ ! "$expected_hash" =~ ^[[:xdigit:]]+$ ]] ||
+            [[ ! "$relative_path" =~ ^[A-Za-z0-9._/-]+$ ]] ||
+            [[ "$relative_path" == ../* || "$relative_path" == */../* || "$relative_path" == */.. ]]; then
+            echo -e "${RED}Invalid runtime manifest entry: hash length=${#expected_hash}, path=[$relative_path]${NC}"
+            return 1
+        fi
+        if [[ "$INSTALL_ASSET_SOURCE" == "local" && ! -s "$RUNTIME_ASSET_DIR/$relative_path" ]]; then
+            echo -e "${RED}Runtime asset is missing from selected local source: $relative_path${NC}"
             return 1
         fi
         if [ ! -s "$RUNTIME_ASSET_DIR/$relative_path" ]; then
+            echo "Downloading: contactcenter-runtime/$relative_path"
             mkdir -p "$RUNTIME_ASSET_DIR/$(dirname "$relative_path")"
             if ! curl -fsSL --connect-timeout 15 --max-time 300 \
                 "$RUNTIME_ASSET_BASE_URL/$relative_path" \
@@ -1039,11 +1142,15 @@ if [ ! -f "$VAD_REQUIREMENTS" ]; then
     exit 1
 fi
 
-VAD_WHEEL_DIR="$OFFLINE_ASSET_ROOT/contactcenter-vad-wheels"
-CONTACTCENTER_WHEEL_DIR="${CONTACTCENTER_WHEEL_DIR:-$OFFLINE_ASSET_ROOT/contactcenter-wheels}"
+VAD_WHEEL_DIR="$(asset_source_path contactcenter-vad-wheels)"
+CONTACTCENTER_WHEEL_DIR="${CONTACTCENTER_WHEEL_DIR:-$(asset_source_path contactcenter-wheels)}"
 VAD_WHEEL_TEMP=false
+if [[ "$INSTALL_ASSET_SOURCE" == "local" && ! -s "$VAD_WHEEL_DIR/manifest.txt" ]]; then
+    echo -e "${RED}VAD wheel manifest missing from selected local source: $VAD_WHEEL_DIR${NC}"
+    exit 1
+fi
 if [ ! -s "$VAD_WHEEL_DIR/manifest.txt" ]; then
-    VAD_WHEEL_BASE_URL="https://voipiran.io/clover/contactcenter-vad-wheels"
+    VAD_WHEEL_BASE_URL="${INSTALL_ASSET_BASE_URL}/contactcenter-vad-wheels"
     VAD_WHEEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-vad-wheels.XXXXXX")
     if curl -fsSL --connect-timeout 15 --max-time 120 \
         "$VAD_WHEEL_BASE_URL/manifest.txt" -o "$VAD_WHEEL_DIR/manifest.txt"; then
@@ -1488,7 +1595,7 @@ if ! command_exists nginx; then
         sudo apt-get update -qq && sudo apt-get install -y nginx
     elif [[ "$OS" =~ (centos|rhel|rocky|fedora) ]]; then
         if [[ "${VERSION_ID%%.*}" == "8" && "$(uname -m)" == "x86_64" ]]; then
-            NGINX_RPM_DIR="$OFFLINE_ASSET_ROOT/nginx-rpms"
+            NGINX_RPM_DIR="$(asset_source_path nginx-rpms)"
             NGINX_FS_RPM="nginx-filesystem-1.14.1-9.module+el8.4.0+542+81547229.noarch.rpm"
             NGINX_RPM="nginx-1.14.1-9.module+el8.4.0+542+81547229.x86_64.rpm"
             NGINX_RPM_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/voiz-console-nginx.XXXXXX")
@@ -1501,8 +1608,13 @@ if ! command_exists nginx; then
                 fi
                 cp "$NGINX_RPM_DIR/$NGINX_FS_RPM" "$NGINX_RPM_DIR/$NGINX_RPM" "$NGINX_RPM_TEMP/"
             else
-                NGINX_RPM_BASE_URL="https://voipiran.io/clover/nginx-rpms"
+                if [[ "$INSTALL_ASSET_SOURCE" == "local" ]]; then
+                    echo -e "${RED}nginx RPMs missing from selected local source: $NGINX_RPM_DIR${NC}"
+                    exit 1
+                fi
+                NGINX_RPM_BASE_URL="${INSTALL_ASSET_BASE_URL}/nginx-rpms"
                 for package in "$NGINX_FS_RPM" "$NGINX_RPM"; do
+                    echo "Downloading: nginx-rpms/$package"
                     if ! curl -fsSL --connect-timeout 15 --max-time 300 \
                         "$NGINX_RPM_BASE_URL/$package" -o "$NGINX_RPM_TEMP/$package"; then
                         echo -e "${RED}Failed to download nginx RPM: $package${NC}"
