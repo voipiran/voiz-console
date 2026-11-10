@@ -65,7 +65,7 @@ Voiz Contact Center برای تیم‌هایی طراحی شده است که م�
 ```bash
 cd /opt && \
 rm -rf voiz-console voiz-console.tar.gz && \
-curl -fL https://voipiran.io/clover/voiz-console.tar.gz \
+curl -fL https://github.com/voipiran/voiz-console/archive/refs/heads/main.tar.gz \
   -o voiz-console.tar.gz && \
 mkdir -p voiz-console && \
 tar -xzf voiz-console.tar.gz --strip-components=1 -C voiz-console && \
@@ -75,7 +75,7 @@ sudo bash install-console.sh
 
 `install-console.sh` نقطه‌ی شروع واحد نصب است. روی Issabel 5، همین فایل Console، وابستگی‌های آفلاین، تنظیمات Nginx، ChanSpy و سفارشی‌سازی‌های VOIPIRAN را انجام می‌دهد؛ فایل جداگانه‌ی `contactcenter.sh` دیگر وجود ندارد.
 
-آرشیو نصب باید در مسیر `https://voipiran.io/clover/voiz-console.tar.gz` منتشر شده باشد. این بسته می‌تواند وابستگی‌های آماده‌شده را در `offline-assets/el8-x86_64` همراه خود داشته باشد؛ نصب‌کننده ابتدا از فایل‌های محلی استفاده می‌کند و در نبود آن‌ها از مسیرهای آفلاین ویپ ایران کمک می‌گیرد.
+آرشیو نصب از شاخه `main` مخزن GitHub دریافت می‌شود و می‌تواند وابستگی‌های آماده‌شده را در `offline-assets/el8-x86_64` همراه خود داشته باشد؛ نصب‌کننده ابتدا از فایل‌های محلی استفاده می‌کند و در صورت انتخاب منبع `remote` از مسیرهای آفلاین ویپ ایران کمک می‌گیرد.
 
 ### آماده‌سازی وابستگی‌های آفلاین
 
@@ -108,7 +108,7 @@ sha256sum /tmp/voiz-console.tar.gz > /tmp/voiz-console.tar.gz.sha256
 ```bash
 sudo rm -rf /opt/voiz-console
 sudo mkdir -p /opt/voiz-console
-sudo curl -fL https://voipiran.io/clover/voiz-console.tar.gz \
+sudo curl -fL https://github.com/voipiran/voiz-console/archive/refs/heads/main.tar.gz \
   -o /tmp/voiz-console.tar.gz
 sudo tar -xzf /tmp/voiz-console.tar.gz --strip-components=1 \
   -C /opt/voiz-console
