@@ -38,7 +38,7 @@ import {
 } from '../../services/recording';
 import { HttpError } from '../http-error';
 import { FileResponse, RawResponse, spreadsheetSafe } from '../respond';
-import { Auth, Delete, Get, Patch, principal } from '../routing';
+import { Auth, Delete, Get, Patch, Post, principal } from '../routing';
 import { parseBody, pInt, pStr, qBool, qInt, qList, qStr, QueryParams, REQUIRED, v } from '../validation';
 import * as fs from 'fs';
 
@@ -308,6 +308,36 @@ export class CallHistoryController {
     }
   }
 
+  /**
+   * One call's recording by its Call ID -- the linkedid the call log and the CRM push carry,
+   * or the uniqueid of any of its legs -- streamed like /api/recordings/{path} (Range/206).
+   * A leg's own recording wins over another leg's. 403 when the call is outside the caller's
+   * history scope (an unknown id reads the same for a scoped user); 404 when the call is
+   * unknown or was not recorded, or its file is gone.
+   */
+  @Get('/api/call-log/recording/:call_id')
+  @Auth({ scope: 'cdr:read' })
+  async getCallRecordingEndpoint(@Req() req: Request) {
+    const callId = pStr(req.params.call_id).trim();
+    if (!callId) throw new HttpError(400, 'call_id is required');
+    const p = principal(req);
+    let legs = await dbm.getCallLegs({ uniqueid: callId });
+    if (!legs.length) legs = await dbm.getCallLegs({ linkedid: callId });
+    await assertCallVisible(p, legs);
+    assertNotHiddenSupervision(p, legs);
+    if (!legs.length) throw new HttpError(404, 'Call not found');
+    const leg = legs.some((l) => String(l.uniqueid ?? '') === callId) ? callId : String(legs[0].uniqueid ?? '');
+    const recordingfile = await dbm.getCdrRecordingfile(leg);
+    if (!recordingfile) throw new HttpError(404, 'Recording not found');
+    // Resolve the basename inside the recordings root, as /api/recordings/{path} does.
+    const resolved = await resolveRecordingRequest(pyBasename(recordingfile));
+    if (!resolved.path) throw new HttpError(404, 'Recording not found');
+    return new FileResponse(resolved.path, {
+      contentType: recordingContentType(resolved.path),
+      filename: pyBasename(resolved.path),
+    });
+  }
+
   /** VAD (voice activity) analysis of a call by the uniqueid of any of its legs. */
   @Get('/api/call-log/vad/:uniqueid')
   @Auth({ scope: 'cdr:read' })
@@ -389,6 +419,25 @@ export class CallHistoryController {
     }
   }
 
+  /**
+   * Mark every new notification on the caller's bell read, not just the page the dropdown
+   * loaded: {ok, updated}. Same scope as GET /api/call-notifications (no `extension` param).
+   */
+  @Post('/api/call-notifications/mark-all-read')
+  @Auth('user')
+  async markAllCallNotificationsReadEndpoint(@Req() req: Request) {
+    const p = principal(req);
+    const allowed = notificationExtensions(p);
+    let extension: string | null = null;
+    if ((allowed === null || p.role === 'agent') && p.extension) extension = p.extension;
+    if (allowed !== null && !allowed.length) return { ok: true, updated: 0 };
+    const updated = await dbm.markCallNotificationsRead({
+      extension,
+      extensions: !extension && allowed !== null ? allowed : null,
+    });
+    return { ok: true, updated };
+  }
+
   /** Mark a notification read or archived; only for an extension whose bell the caller reads. */
   @Patch('/api/call-notifications/:notification_id')
   @Auth('user')
@@ -419,10 +468,14 @@ export class CallHistoryController {
    * uniqueid, linkedid, recording_path, size_bytes}], total, next_cursor}. Filters: search
    * (number or call id), date_from / date_to ('YYYY-MM-DD', inclusive). Pass the returned
    * next_cursor as `cursor` for the following page.
+   *
+   * An admin or an API key with cdr:read (an integration syncing recordings); the list is
+   * not scoped, so a signed-in supervisor or agent is 403 here as before.
    */
   @Get('/api/recordings')
-  @Auth('admin')
+  @Auth({ scope: 'cdr:read' })
   async listRecordingsEndpoint(@Req() req: Request) {
+    if (!isUnrestricted(principal(req))) throw new HttpError(403, 'Admin only');
     const q = req.query as QueryParams;
     const limit = qInt(q, 'limit', 25);
     const cursor = qStr(q, 'cursor', null);

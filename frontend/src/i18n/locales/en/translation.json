@@ -82,10 +82,15 @@
   },
   "extensions": {
     "noExtensions": "No extensions being monitored",
+    "timeInState": "Time in {{status}}",
     "webrtcEnabled": "WebRTC enabled (click to disable)",
     "webrtcDisabled": "WebRTC disabled (click to enable)",
     "webrtcOn": "WebRTC on",
     "webrtcOff": "WebRTC off",
+    "view": "View",
+    "gridView": "Grid View",
+    "listView": "List View",
+    "webrtcBadge": "WebRTC",
     "status": {
       "idle": "Idle",
       "ringing": "Ringing",
@@ -191,7 +196,14 @@
     "setReady": "Set Ready",
     "setNotReady": "Set Not Ready",
     "logoutTitle": "Log {{agent}} out?",
-    "logoutConfirm": "{{agent}} leaves every queue and stops receiving queue calls."
+    "logoutConfirm": "{{agent}} leaves every queue and stops receiving queue calls.",
+    "filterAll": "All",
+    "filterAgents": "Queue agents",
+    "filterExtensions": "Extensions",
+    "inQueues": "In queues",
+    "setAvailable": "Set Available",
+    "setBreak": "Set Break",
+    "offlineOnBreak": "Offline · {{reason}}"
   },
   "callLog": {
     "viewManage": "View and manage call records",
@@ -377,6 +389,8 @@
     "quality_jitter": "Jitter",
     "quality_loss": "Loss",
     "reconnect": "Reconnect",
+    "reconnectHint": "Not registered: reload settings and reconnect",
+    "refreshHint": "Reload phone settings",
     "adminServerHint": {
       "after": "in Settings.",
       "before": "Admin: set"
@@ -405,7 +419,8 @@
     },
     "levelMic": "Microphone (your voice)",
     "levelSpeaker": "Speaker (incoming volume)",
-    "lastCall": "Last call"
+    "lastCall": "Last call",
+    "webrtcOffHint": "The browser phone is off for your user. Use your desk or mobile phone; your status, breaks and DND still work here."
   },
   "users": {
     "title": "All users",
@@ -413,6 +428,8 @@
     "addNewUser": "Add new user",
     "editUser": "Edit user",
     "updateUser": "Update user",
+    "extensionRequired": "Choose an extension for the new agent.",
+    "joinsYourGroups": "The new agent joins your groups automatically.",
     "addUser": "Add user",
     "noUsers": "No users yet. Add one above.",
     "loading": "Loading users...",
@@ -430,7 +447,9 @@
     "multiDeviceSaveFailed": "User saved, but updating the device limit failed.",
     "role": "Role",
     "monitorModes": "Monitor modes (select one or more)",
-    "groupsLabel": "Groups (user gets access to agents and queues from selected groups)",
+    "groupsLabel": "Groups",
+    "groupsHint": "The teams this supervisor oversees: their member extensions and queues, live and in call history.",
+    "groupsHintAdmin": "Admins see every extension and queue, so groups change nothing for them.",
     "createNewGroup": "Create new group",
     "newGroupNamePlaceholder": "New group name (optional)",
     "profile": "Profile",
@@ -486,19 +505,21 @@
     "adminOnly": "Only administrators can manage groups.",
     "groupName": "Group name",
     "namePlaceholder": "e.g. Sales, Support",
-    "agents": "Agents (extensions this group can access)",
-    "queues": "Queues (queues this group can access)",
-    "usersInGroup": "Users in this group (they get access to the agents and queues above)",
+    "members": "Member extensions",
+    "membersHint": "The agents on this team. Each one sees the team's extensions and queues live, but only their own call history.",
+    "queues": "Queues",
+    "queuesHint": "The queues this team answers.",
+    "supervisors": "Supervisors",
+    "supervisorsHint": "Supervisors see everything about the members and queues above: live panels, call history, recordings and reports.",
     "groupSection": "Group",
-    "agentsQueues": "Agents & queues",
-    "description": "Create access groups: name, agents (extensions), queues, and assign users. User access is derived from their groups.",
-    "agentsLabel": "Agents",
-    "selectAgents": "Select agents...",
+    "description": "A group is a team: the agent extensions and queues it covers, and the supervisors who oversee it.",
+    "membersLabel": "Members",
+    "selectMembers": "Select extensions...",
     "selectQueues": "Select queues...",
-    "selectUsers": "Select users...",
+    "selectSupervisors": "Select supervisors...",
     "noAgents": "No agents in system",
     "noQueues": "No queues in system",
-    "noUsers": "No users",
+    "noSupervisors": "No supervisors yet. Create one on the Users tab.",
     "deleteConfirm": "Delete group \"{{name}}\"? Users will lose access to this group's agents and queues.",
     "adminRequired": "Admin access required to manage groups.",
     "loadError": "Failed to load groups or options",
@@ -507,14 +528,14 @@
     "groupDeleted": "Group deleted",
     "groupNameRequired": "Group name is required",
     "searchLabel": "Search groups",
-    "searchPlaceholder": "Group, agent, queue, user…",
+    "searchPlaceholder": "Group, extension, queue, supervisor…",
     "noMatches": "No groups match \"{{query}}\"",
-    "agentsCount_one": "{{count}} agent",
-    "agentsCount_other": "{{count}} agents",
+    "membersCount_one": "{{count}} member",
+    "membersCount_other": "{{count}} members",
     "queuesCount_one": "{{count}} queue",
     "queuesCount_other": "{{count}} queues",
-    "usersCount_one": "{{count}} user",
-    "usersCount_other": "{{count}} users",
+    "supervisorsCount_one": "{{count}} supervisor",
+    "supervisorsCount_other": "{{count}} supervisors",
     "deleteTitle": "Delete group?"
   },
   "supervisor": {
@@ -551,16 +572,16 @@
       "description": "Send call data to your CRM after each call. Configure server URL and authentication.",
       "enable": "Enable CRM integration",
       "enableDesc": "When enabled, call data will be sent to your CRM system after each call ends.",
-      "serverUrl": "CRM server URL *",
+      "serverUrl": "CRM server URL",
       "authType": "Authentication type",
-      "apiKey": "API key *",
+      "apiKey": "API key",
       "apiKeyHeader": "API key header (optional)",
       "defaultApiKeyHeader": "Default: X-API-Key",
-      "username": "Username *",
-      "password": "Password *",
-      "bearerToken": "Bearer token *",
-      "clientId": "Client ID *",
-      "clientSecret": "Client secret *",
+      "username": "Username",
+      "password": "Password",
+      "bearerToken": "Bearer token",
+      "clientId": "Client ID",
+      "clientSecret": "Client secret",
       "tokenUrl": "Token URL (optional)",
       "scope": "Scope (optional)",
       "advancedOptions": "Advanced options",
@@ -845,7 +866,8 @@
         "contactCenter": "Contact center",
         "telephony": "Telephony & network",
         "recording": "Recording & compliance",
-        "access": "Integrations & access"
+        "access": "Integrations & access",
+        "security": "Security"
       },
       "desc": {
         "analytics": "SLA target, FCR window and short-abandon threshold.",
@@ -856,7 +878,8 @@
         "sipTls": "Encrypted SIP on port 5061 for traditional softphones.",
         "codecs": "The codecs every extension offers, in order of preference.",
         "recordingPolicy": "Record calls by direction and extension; where the files live and how long they are kept.",
-        "notReadyCodes": "Not-Ready reasons, the wrap-up ceiling and the daily shift reset."
+        "notReadyCodes": "Not-Ready reasons, the wrap-up ceiling and the daily shift reset.",
+        "firewall": "Allow only chosen countries (GeoIP) and ban addresses that keep failing to sign in (fail2ban)."
       },
       "noMatches": "No settings match your search.",
       "searchPlaceholder": "Search settings…",
@@ -867,13 +890,16 @@
         "noActiveCodes": "No active codes",
         "noKeys": "No active keys",
         "sla": "SLA target {{n}}s",
-        "wakeHold": "{{n}}s hold"
+        "wakeHold": "{{n}}s hold",
+        "geoip": "GeoIP · {{list}}",
+        "geoipOff": "GeoIP off"
       },
       "title": {
         "apiKeys": "API keys",
         "mobileWake": "Mobile wake",
         "codecs": "Audio Codecs",
-        "recording": "Call recording"
+        "recording": "Call recording",
+        "firewall": "Firewall"
       }
     },
     "mobileWake": {
@@ -970,14 +996,14 @@
       "wrapUpLabel": "Wrap-up ceiling (seconds)",
       "wrapUpHelp": "How long an agent stays paused after a queue call before returning to Ready. They can finish sooner from their status menu, so this is a ceiling, not a fixed delay. 0 turns the auto-release off. Applies from the next completed call.",
       "shiftResetLabel": "Daily shift reset",
-      "shiftResetHelp": "At this time each day every signed-in agent is logged out of their queues, so a shift left open does not run into the next one and Agent Adherence reports one shift per day. An agent on a call is logged out when the call ends; an agent on Do Not Disturb is left alone. Clear the field to turn the reset off.",
+      "shiftResetHelp": "At this time each day status timers restart and reports split here. Nobody is logged out of their queues. Anyone left idle in Available is signed off until they come back.",
       "wrapUpLoadFailed": "Could not read the wrap-up setting.",
       "shiftResetLoadFailed": "Could not read the shift reset time.",
       "wrapUpOffSaved": "Wrap-up auto-release turned off: agents stay in wrap-up until they finish it.",
       "wrapUpSaved": "Wrap-up ceiling set to {{n}} s. Applies from the next completed call.",
       "wrapUpSaveFailed": "Could not save the wrap-up setting.",
-      "shiftResetSaved": "Agents are logged out of their queues at {{time}} each day.",
-      "shiftResetOffSaved": "Daily shift reset turned off: agents stay logged in until they log out.",
+      "shiftResetSaved": "The day restarts at {{time}}.",
+      "shiftResetOffSaved": "Daily shift reset turned off: status timers keep running.",
       "shiftResetSaveFailed": "Could not save the shift reset time.",
       "saving": "Saving…",
       "save": "Save changes"
@@ -1277,15 +1303,16 @@
     }
   },
   "agent": {
+    "dndShort": "DND",
     "adherence": {
       "title": "Agent adherence",
-      "subtitle": "Login, ready, on-call and break time per agent for the selected period.",
+      "subtitle": "Registered, available, idle, on-call, break and queue time per extension for the selected period.",
       "login": "Login",
       "logout": "Logout",
       "loggedIn": "Logged in",
       "occupancy": "Occupancy",
       "stillIn": "In",
-      "empty": "No agent activity for this period",
+      "empty": "No activity for this period",
       "exportCsv": "CSV",
       "exportXlsx": "Excel",
       "sessions": "Sessions",
@@ -1293,44 +1320,82 @@
       "dnd": "DND",
       "tip": {
         "source": {
-          "text": "Based on the status agents set themselves, not on their phones."
+          "text": "Availability follows the phone registration; breaks are the status agents set themselves."
         },
         "login": {
-          "text": "When the agent first logged in during the period."
+          "text": "When the extension first became available during the period."
         },
         "logout": {
-          "text": "When the agent last logged out. \"In\" while still signed in."
+          "text": "When the extension last went offline. \"In\" while still available."
         },
         "sessions": {
-          "text": "How many times the agent logged in. A logout, or the daily shift reset, ends a session."
+          "text": "How many times the extension became available. The phone going offline, or the daily shift reset, ends a session."
         },
         "loggedInTotal": {
-          "text": "Total time the agent was signed in.",
-          "formula": "ready + on call + wrap-up + not ready + DND"
+          "text": "Total time the extension was available or on a break.",
+          "formula": "available + not ready"
         },
         "ready": {
           "text": "Available: signed in and waiting for a call."
         },
         "onCall": {
-          "text": "On a call."
+          "text": "On any answered call: inbound, outbound or internal."
         },
         "wrapUp": {
-          "text": "Finishing up after a call."
+          "text": "Finishing up after a queue call."
         },
         "break": {
           "text": "The unpaid part of Not Ready: reasons not marked productive, such as lunch. Hover the number for the reasons."
         },
         "notReady": {
-          "text": "Paused with any reason, productive or not. Hover the number for the reasons."
+          "text": "On a break with any reason, productive or not. Hover the number for the reasons."
         },
         "dnd": {
-          "text": "Signed in but on Do Not Disturb: no queue or direct calls reach the agent."
+          "text": "Do Not Disturb was on: inbound calls blocked, out of the queues, any break ended. Counts as Idle while registered. Outbound calls still work."
         },
         "occupancy": {
           "text": "Of the time they were available, how much was spent working. Over 85% for long is a burnout sign.",
-          "formula": "(on call + wrap-up) ÷ (on call + wrap-up + ready)"
+          "formula": "(on call + wrap-up) ÷ (on call + wrap-up + idle)"
+        },
+        "registered": {
+          "text": "Time online: the phone was registered, or asleep but able to be woken by push."
+        },
+        "available": {
+          "text": "Ready to work: idle, on a call, or wrapping up.",
+          "formula": "idle + on call + wrap-up"
+        },
+        "idle": {
+          "text": "Available with no call. Hover the number for the part spent with DND on."
+        },
+        "queueLogin": {
+          "text": "Time logged into the queues. Separate from availability."
+        },
+        "outbound": {
+          "text": "Outbound calls placed, with the talk time of the answered ones."
+        },
+        "loggedInQueue": {
+          "text": "Time logged into the queues. Separate from being online; plain extensions have none."
+        },
+        "firstOnline": {
+          "text": "When the phone first came online in the period."
+        },
+        "lastOffline": {
+          "text": "When the phone last went offline. \"Online\" while it still is."
         }
-      }
+      },
+      "registered": "Registered",
+      "available": "Available",
+      "idle": "Idle",
+      "idleOnDnd": "Idle on DND",
+      "queueLogin": "Queue login",
+      "outbound": "Outbound",
+      "outboundTalk": "Talk",
+      "extensionTag": "extension",
+      "typeFilter": "Show",
+      "firstOnline": "First online",
+      "lastOffline": "Last offline",
+      "onlineNow": "Online",
+      "loggedInQueue": "Logged in"
     },
     "noReasons": "No reason codes",
     "unpaid": "break",
@@ -1344,7 +1409,9 @@
       "loggedOut": "Offline",
       "wrapUp": "Wrap-up",
       "queueLabel": "Queue: {{queue}}",
-      "deviceAsleep": "Ready, but the phone is asleep; it wakes on the next call"
+      "deviceAsleep": "Available, but the phone is asleep; it wakes on the next call",
+      "breakOffline": "Break (offline)",
+      "break": "Break"
     },
     "codes": {
       "deleteFailed": "Could not delete that reason code.",
@@ -1368,8 +1435,27 @@
       "source": {
         "ami": "phone",
         "supervisor": "supervisor"
-      }
-    }
+      },
+      "registered": "Phone registered",
+      "queueLogin": "Queue login",
+      "viaPush": "asleep · push"
+    },
+    "signedOffHint": "Signed off at the shift reset: press Available to start",
+    "startShift": "Available",
+    "offlineHint": "Offline: availability starts when the phone registers",
+    "asleepHint": "The app is asleep; calls wake it by push",
+    "dndOff": "Turn DND off",
+    "queueLogin": "Log in to queues",
+    "queueLogout": "Log out of queues",
+    "pickBreak": "Break, with a reason",
+    "pickBreakEndsDnd": "Break, with a reason (turns DND off)",
+    "resume": "Resume",
+    "dndOn": "Turn on Do Not Disturb",
+    "dndSub": "Inbound blocked · outbound still works",
+    "pausedInQueues": "Paused in queues",
+    "lockedOnCall": "Controls unlock when the call ends",
+    "extRegistered": "Ext {{ext}} · Registered",
+    "extNotRegistered": "Ext {{ext}} · Not registered"
   },
   "logs": {
     "tabs": {
@@ -1478,7 +1564,12 @@
     "productiveHint": "Counts as paid work (e.g. Meeting, Training) rather than a break in adherence.",
     "activeHint": "Inactive codes are hidden from the agent picker.",
     "systemHint": "Used by OpDesk itself; it cannot be edited or deleted.",
-    "reservedCode": "Codes starting with __ are reserved for the system."
+    "reservedCode": "Codes starting with __ are reserved for the system.",
+    "window": "Break window",
+    "windowMinutes": "{{count}} min",
+    "windowLabel": "Break window (minutes)",
+    "windowNone": "No window",
+    "windowHint": "If the phone goes offline during this break (laptop closed, internet drop), the offline time still counts as this break up to this many minutes from the break start; after that it counts as offline. Leave empty to count no offline time."
   },
   "contacts": {
     "loading": "Loading contacts…",
@@ -1521,6 +1612,13 @@
     "getApp": "Get Medut Softphone",
     "qrAlt": "Account QR code",
     "includePassword": "Include the password",
+    "sipPort": "SIP port",
+    "sipPortHint": "The port the phone connects to. Change it when the PBX is reached through a forwarded port (e.g. 5162 instead of 5060).",
+    "sipPortSavedHint": "Saved default for {{transport}} extensions: {{port}} (the PBX listens on {{pbx}}). Change it here for this code only.",
+    "sipPortSave": "Save for all {{transport}}",
+    "sipPortSaveHint": "Every setup code for a {{transport}} extension uses this port.",
+    "sipPortReset": "Use PBX port ({{pbx}})",
+    "sipPortInvalid": "Enter a port from 1 to 65535.",
     "passwordOn": "One scan signs in. Treat the code like the password itself.",
     "passwordOff": "Safe to print or share: the app asks for the password.",
     "json": "Account JSON",
@@ -1620,6 +1718,7 @@
     "FAILURE": "Failure",
     "ABANDONED": "Abandoned",
     "DROPPED": "Dropped",
+    "ANSWERED_BY_SYSTEM": "Answered by system",
     "UNANSWERED": "Unanswered",
     "MISSED": "Missed",
     "VOICEMAIL": "Voicemail",
@@ -1782,8 +1881,9 @@
     "UNREACHABLE": "The phone was switched off, unregistered or out of service.",
     "FAILURE": "The call could not be placed, for example a wrong number.",
     "NETWORK_ERROR": "The route or the carrier failed: congestion or no circuit.",
-    "ABANDONED": "The caller hung up while waiting in a queue.",
-    "DROPPED": "The call was answered, then cut off abnormally."
+    "ABANDONED": "No agent took this queue call.",
+    "DROPPED": "The call was answered, then cut off abnormally.",
+    "ANSWERED_BY_SYSTEM": "The PBX picked up (an IVR, announcement or feature code) but no person did."
   },
   "audit": {
     "loadError": "Could not load the audit log.",
@@ -1814,5 +1914,141 @@
       "login": "Sign in",
       "logout": "Sign out"
     }
+  },
+  "firewall": {
+    "unknownCountry": "Unknown",
+    "geoip": {
+      "confirmTitle": "Turn on GeoIP filtering?",
+      "confirmBody": "New connections from outside {{list}} will be dropped on every port, including SIP trunks and phones abroad that are not in the trusted list.",
+      "turnOn": "Turn on",
+      "updated": "Country data updated.",
+      "updateHint": "Download the latest country lists now (they refresh weekly on their own)",
+      "update": "Update data",
+      "tab": "GeoIP",
+      "statusLabel": "GeoIP status",
+      "active": "Filtering",
+      "notApplied": "On, not applied",
+      "dropped": "Dropped packets: {{n}}",
+      "dataDate": "Data: {{date}}",
+      "noData": "No country data yet: use Update data",
+      "you": "You: {{ip}}",
+      "missingTool": "{{tool}} is not installed on this server; GeoIP filtering cannot be applied.",
+      "conflicts": "Also running: {{list}}. It may reset the rules; OpDesk re-checks them every 5 minutes.",
+      "title": "Country allow-list",
+      "description": "Only the countries below can open new connections to this server, on every port (SIP, RTP, web, SSH). Replies to connections the server makes, LAN addresses and the trusted list always get through.",
+      "enable": "Filter by country",
+      "countries": "Allowed countries",
+      "countriesHint": "Everything else is dropped while filtering is on.",
+      "pickCountries": "Pick countries…",
+      "searchCountries": "Search countries…",
+      "downloading": "Downloading country list…",
+      "persisted": "Saved for reboot",
+      "notPersisted": "Not saved for reboot",
+      "privateClient": "Your connection reaches this server from {{ip}}, a private address: a router, NAT or proxy in front of the server is replacing the real client address. GeoIP always lets private addresses through, so it cannot filter traffic that arrives this way. Forward the ports without source NAT so the server sees real client IPs."
+    },
+    "saved": "Saved and applied.",
+    "f2b": {
+      "bannedMsg": "{{ip}} banned in {{jail}}.",
+      "unbannedMsg": "{{ip}} unbanned.",
+      "disableTitle": "Disable this jail?",
+      "disableBody": "{{jail}} stops watching its log and its bans are lifted.",
+      "disable": "Disable",
+      "jailSaved": "{{jail}} updated.",
+      "permanent": "permanent",
+      "ip": "IP address",
+      "jail": "Jail",
+      "bannedAt": "Banned",
+      "until": "Until",
+      "unban": "Unban",
+      "opdeskLogins": "OpDesk logins",
+      "maxretry": "Max retries",
+      "findtime": "Window",
+      "bantime": "Ban time",
+      "bannedCount": "Banned",
+      "on": "On",
+      "off": "Off",
+      "edit": "Edit thresholds",
+      "tab": "Fail2ban",
+      "notRunning": "fail2ban is not running on this server.",
+      "bans": "Banned addresses",
+      "noBans": "Nobody is banned.",
+      "banIp": "Ban an address",
+      "ban": "Ban",
+      "jails": "Jails",
+      "jailsHint": "An address that fails \"Max retries\" times within \"Window\" is banned on every port for \"Ban time\". The opdesk jail watches failed OpDesk sign-ins and rejected API keys.",
+      "editTitle": "Jail: {{jail}}",
+      "maxretryHint": "Failures before a ban. 1 to 1000.",
+      "findtimeSecs": "Window (seconds)",
+      "findtimeHint": "Failures are counted over this long. 60 to 2592000 (30 days).",
+      "bantimeSecs": "Ban time (seconds)",
+      "bantimeHint": "60 to 31536000 (a year), or -1 to ban for good."
+    },
+    "country": "Country",
+    "sections": "Firewall sections",
+    "trusted": {
+      "title": "Trusted addresses",
+      "label": "IP addresses and networks",
+      "hint": "One per line, e.g. 203.0.113.10 or 198.51.100.0/24. Always allowed through GeoIP and never banned by fail2ban. Add SIP trunk providers and remote offices here.",
+      "addMine": "Add my address ({{ip}})",
+      "wouldBlock": "Your own address is not allowed by these settings; saving will be refused."
+    },
+    "logs": {
+      "tab": "Logs",
+      "loginFailed": "Login failed",
+      "apiKeyFailed": "Bad API key",
+      "detected": "Failure detected",
+      "banned": "Banned",
+      "unbanned": "Unbanned",
+      "time": "Time",
+      "event": "Event",
+      "detail": "Jail / user",
+      "description": "Failed OpDesk sign-ins and rejected API keys, and what fail2ban detected, banned and unbanned. Newest first.",
+      "empty": "No security events yet.",
+      "files": "Files on the server:"
+    }
+  },
+  "profileStatus": {
+    "availability": "Availability",
+    "title": "Status",
+    "window": "Break window {{min}} min",
+    "wrapSub": "Finish wrap-up to take calls",
+    "readySub": "Ready for calls",
+    "queuesOutDnd": "Out while DND is on · restored after",
+    "queuesOff": "Not taking queue calls",
+    "queuesPaused": "{{queues}} · paused (on break)",
+    "queuesOn": "Taking queue calls",
+    "turnsDndOff": "Turns DND off",
+    "switchBreak": "Switch break reason",
+    "pickReason": "Pick a reason",
+    "paid": "paid",
+    "dndSub": "Blocks inbound, leaves queues"
+  },
+  "extActions": {
+    "menu": "Actions for {{ext}}",
+    "lockedOnCall": "Break, queue and DND unlock when the call ends.",
+    "offline": "The phone is offline. Its status changes when it registers.",
+    "forceBreak": "Set a break",
+    "queuesDnd": "Out while DND is on · restored after",
+    "timeline": "Open timeline",
+    "calls": "Calls today",
+    "call": "Call {{ext}}"
+  },
+  "extCard": {
+    "registered": "Registered",
+    "asleep": "Asleep, wakes by push",
+    "noQueues": "No queues · outbound",
+    "outDnd": "Out (DND)",
+    "notInQueues": "Not in queues",
+    "inQueues": "In queues",
+    "window": "Break window {{min}} min"
+  },
+  "presenceToast": {
+    "queueIn": "logged you in to your queues",
+    "queueOut": "logged you out of your queues",
+    "wrapDone": "finished your wrap-up",
+    "break": "set you on Break · {{reason}}",
+    "available": "set you Available",
+    "dndOff": "turned your DND off",
+    "dndOn": "turned on Do Not Disturb for you"
   }
 }

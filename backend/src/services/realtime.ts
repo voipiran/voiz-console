@@ -14,6 +14,7 @@ import { amiEventBuffer } from '../core/system-logs';
 import * as dbm from '../db/db-manager';
 import type { CRMConnector, CRMSyncConfig } from '../integrations/crm';
 import * as pushService from '../integrations/push-service';
+import { RegistrationTracker } from './registration';
 import { AgentStateManager } from './agent-state';
 import { AMIExtensionsMonitor, logStartupSummary } from './ami';
 import { startBackgroundJobs, stopBackgroundJobs } from './background';
@@ -22,7 +23,6 @@ import * as sipPush from './sip-push';
 const log = getLogger('services.realtime');
 
 /** A predial VoIP push suppresses the ring-time push for this long (seconds). */
-export const PRE_WAKE_TTL = 12.0;
 export const AMI_CONNECT_ATTEMPTS = 10;
 export const AMI_CONNECT_RETRY_SECONDS = 3;
 
@@ -83,10 +83,11 @@ export async function startRealtime(opts: StartRealtimeOptions = {}): Promise<bo
   }
   await monitor.loadDeviceTechs();
 
-  // Initial sync, before live events are processed.
+  // Initial sync, before live events are processed. Queues first: it also waits out a
+  // still-booting Asterisk, so the other syncs read a live PBX.
+  await monitor.syncQueuesWhenReady();
   await monitor.syncExtensionStatuses();
   await monitor.syncActiveCalls();
-  await monitor.syncQueueStatus();
   await monitor.syncDndState();
   logStartupSummary(monitor);
 
@@ -100,7 +101,7 @@ export async function startRealtime(opts: StartRealtimeOptions = {}): Promise<bo
   // System Logs panel (buffer disabled by default: one attribute read per event).
   monitor.setRawEventSink((p) => amiEventBuffer.add(p));
   monitor.setIncomingCallCallback((ext, caller, callId, displayName) => {
-    createTask(onIncomingCall(ext, caller, callId, displayName));
+    sipPush.onIncomingCall(ext, caller, callId, displayName);
   });
 
   await monitor.startEvents();
@@ -109,15 +110,28 @@ export async function startRealtime(opts: StartRealtimeOptions = {}): Promise<bo
   setBridge(bridge);
   await bridge.start();
 
-  // Agent presence: reconciled from AMI queue/agent events, hydrated from live members.
+  // Presence: reachability (registered / push-wakeable) drives availability for every
+  // extension; queue login and DND are reconciled from AMI and AstDB.
+  const registration = new RegistrationTracker(monitor);
   const agentState = new AgentStateManager(monitor);
+  agentState.registration = registration;
+  agentState.wokenAt = (ext) => runtime.wokenAt.get(ext) ?? null;
+  registration.listener = agentState;
   runtime.agentState = agentState;
+  runtime.registration = registration;
+  try {
+    await registration.hydrate();
+  } catch (e) {
+    log.warning('Reachability hydrate failed: %s', e);
+  }
   monitor.registerEventCallback((ev) => agentState.handleAmiEvent(ev));
+  monitor.registerEventCallback((ev) => registration.handleAmiEvent(ev));
   try {
     await agentState.hydrate();
   } catch (e) {
     log.warning('Agent presence hydrate failed: %s', e);
   }
+  registration.start();
 
   log.info('🎯 Server ready - tracking realtime AMI events');
   return true;
@@ -139,6 +153,8 @@ export async function stopRealtime(): Promise<void> {
   setBridge(null);
   const monitor = runtime.monitor;
   if (monitor) await step('ami', () => monitor.disconnect());
+  runtime.registration?.stop();
+  runtime.registration = null;
   runtime.agentState = null;
   runtime.monitor = null;
 }
@@ -165,32 +181,6 @@ export async function sendToOwnExtension(ext: string, msg: Record<string, unknow
   for (const ws of [...manager.activeConnections]) {
     const scope = manager.getScope(ws) as LiveScope;
     if (String(scope.extension || '').trim() === target) await manager.sendPersonal(ws, msg);
-  }
-}
-
-/** A monitored extension started ringing: warm the contact cache, wake its mobile app. */
-export async function onIncomingCall(ext: string, caller: string, callId: string, displayName: string): Promise<void> {
-  try {
-    // Warm the CRM contact cache at first ring (before the pre-wake dedup below, which is
-    // only about VoIP pushes).
-    const resolver = runtime.contactResolver as { resolveCached?: (n: string, m?: Set<string> | null) => unknown } | null;
-    if (resolver && typeof resolver.resolveCached === 'function') {
-      try {
-        await resolver.resolveCached(caller, runtime.monitor?.monitored ?? null);
-      } catch (e) {
-        log.debug('contact warm-up failed: %s', e);
-      }
-    }
-    // A predial VoIP push already went out for this extension: a second one would create
-    // a second CallKit UUID, the end-call would land on the wrong one and no BYE is sent.
-    const wakeTime = runtime.preWoken.get(ext) ?? 0;
-    runtime.preWoken.delete(ext);
-    if (monotonic() - wakeTime < PRE_WAKE_TTL) return;
-    createTask(Promise.resolve(pushService.sendCallWake(ext, caller, callId, displayName)));
-    // RFC 8599 bindings: this call skipped the pre-dial hook (or the hook is off).
-    createTask(Promise.resolve(sipPush.ring(ext, caller, displayName)));
-  } catch (e) {
-    log.debug('incoming call handling failed for %s: %s', ext, e);
   }
 }
 

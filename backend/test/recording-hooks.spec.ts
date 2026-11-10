@@ -1,11 +1,11 @@
 /**
  * Recording is only "on" when Asterisk actually runs [opdesk-record] from the predial hooks.
- * Duplicate contexts are first-wins, so another recorder #included earlier (Echo on a shared
+ * Duplicate contexts are first-wins, so another recorder #included earlier (on a shared
  * box) keeps the hooks and OpDesk's file loses silently. recordingHookConflicts reads back
  * what was loaded; the enable route refuses (409) and rolls back when the hooks are taken.
  *
  * child_process is mocked: `dialplan show` answers come from the fixtures below, captured
- * from a real FreePBX box with Echo installed.
+ * from a real FreePBX box with another recorder installed.
  */
 
 const mockCli: Record<string, string> = {};
@@ -29,11 +29,11 @@ import { hookConflictMessage, RecordingController } from '../src/api/routes/reco
 const ONE = 'dialplan show s@macro-dialout-one-predial-hook';
 const TRUNK = 'dialplan show s@macro-dialout-trunk-predial-hook';
 
-const ECHO_ONE = `[ Context 'macro-dialout-one-predial-hook' created by 'pbx_config' ]
-  's' =>            1. GosubIf($["\${ECHO_REC}"=""]?echo-record,s,1) [extensions_echo_record.conf:17]
-                    2. Return()                                   [extensions_echo_record.conf:19]
+const OTHER_ONE = `[ Context 'macro-dialout-one-predial-hook' created by 'pbx_config' ]
+  's' =>            1. GosubIf($["\${OTHER_REC}"=""]?other-record,s,1) [extensions_other_record.conf:17]
+                    2. Return()                                   [extensions_other_record.conf:19]
 `;
-const ECHO_TRUNK = ECHO_ONE.replace('one-predial', 'trunk-predial');
+const OTHER_TRUNK = OTHER_ONE.replace('one-predial', 'trunk-predial');
 const OURS_ONE = `[ Context 'macro-dialout-one-predial-hook' created by 'pbx_config' ]
   's' =>            1. GosubIf($["\${OPDESK_REC}"=""]?opdesk-record,s,1) [extensions_opdesk_record.conf:19]
                     2. Return()                                   [extensions_opdesk_record.conf:20]
@@ -58,12 +58,30 @@ describe('recordingHookConflicts', () => {
   });
 
   test("another recorder's file kept the hooks: named per hook", async () => {
-    mockCli[ONE] = ECHO_ONE;
-    mockCli[TRUNK] = ECHO_TRUNK;
+    mockCli[ONE] = OTHER_ONE;
+    mockCli[TRUNK] = OTHER_TRUNK;
     expect(await dialplan.recordingHookConflicts()).toEqual([
-      { context: 'macro-dialout-one-predial-hook', file: 'extensions_echo_record.conf' },
-      { context: 'macro-dialout-trunk-predial-hook', file: 'extensions_echo_record.conf' },
+      { context: 'macro-dialout-one-predial-hook', file: 'extensions_other_record.conf' },
+      { context: 'macro-dialout-trunk-predial-hook', file: 'extensions_other_record.conf' },
     ]);
+  });
+
+  test('Issabel: [sub-record-check] is checked in place of the never-called one-predial hook', async () => {
+    const SUB = 'dialplan show s@sub-record-check';
+    mockCli[TRUNK] = CHAINED_TRUNK;
+    // Ours defines the one-predial hook too, but IssabelPBX never calls it: it must not count.
+    mockCli[ONE] = OURS_ONE;
+    mockCli[SUB] = `[ Context 'sub-record-check' created by 'pbx_config' ]
+  's' =>            1. Set(REC_POLICY_MODE_SAVE=\${REC_POLICY_MODE}) [extensions_additional.conf:1523]
+`;
+    expect(await dialplan.recordingHookConflicts('Issabel')).toEqual([
+      { context: 'sub-record-check', file: 'extensions_additional.conf' },
+    ]);
+    mockCli[SUB] = `[ Context 'sub-record-check' created by 'pbx_config' ]
+  's' =>            1. Gosub(opdesk-issabel-record-check,s,1)     [extensions_opdesk_record_override.conf:7]
+                    2. GotoIf($["\${BLINDTRANSFER}" = ""]?check)  [extensions_additional.conf:1524]
+`;
+    expect(await dialplan.recordingHookConflicts('Issabel')).toEqual([]);
   });
 
   test('a hook that did not load at all has no owning file', async () => {
@@ -76,11 +94,11 @@ describe('recordingHookConflicts', () => {
 describe('hookConflictMessage', () => {
   test('names each owning file once and says what to do', () => {
     const msg = hookConflictMessage([
-      { context: 'a', file: 'extensions_echo_record.conf' },
-      { context: 'b', file: 'extensions_echo_record.conf' },
+      { context: 'a', file: 'extensions_other_record.conf' },
+      { context: 'b', file: 'extensions_other_record.conf' },
     ]);
-    expect(msg).toContain('extensions_echo_record.conf already defines the PBX predial hooks');
-    expect(msg.match(/extensions_echo_record\.conf/g)).toHaveLength(1);
+    expect(msg).toContain('extensions_other_record.conf already defines the PBX predial hooks');
+    expect(msg.match(/extensions_other_record\.conf/g)).toHaveLength(1);
     expect(msg).toContain('#include');
   });
 
@@ -97,7 +115,7 @@ describe('POST /api/recording/enable', () => {
     jest.spyOn(dialplan, 'enableRecording').mockResolvedValue(true);
     const disable = jest.spyOn(dialplan, 'disableRecording').mockResolvedValue(true);
     jest.spyOn(dialplan, 'recordingHookConflicts').mockResolvedValue([
-      { context: 'macro-dialout-one-predial-hook', file: 'extensions_echo_record.conf' },
+      { context: 'macro-dialout-one-predial-hook', file: 'extensions_other_record.conf' },
     ]);
     await expect(ctl.enableRecordingEndpoint(req)).rejects.toMatchObject({ status: 409 });
     expect(disable).toHaveBeenCalledTimes(1);

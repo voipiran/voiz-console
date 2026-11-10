@@ -28,9 +28,14 @@ jest.mock('../src/db/db-manager', () => ({
   getAgentLoginQueues: jest.fn(async () => ['800']),
   pauseReasonForNotReady: jest.fn(async (c: string) => (c === 'lunch' ? { code: 'lunch', label: 'Lunch', is_active: 1, is_system: 0 } : null)),
   agentActivityTransition: jest.fn(async () => 1),
+  queueLoginOpen: jest.fn(async () => true),
+  queueLoginClose: jest.fn(async () => true),
+  dndOpen: jest.fn(async () => true),
+  dndClose: jest.fn(async () => true),
   getSetting: jest.fn(async (_k: string, d: string) => d),
   insertCallNotification: jest.fn(async () => 1),
   recordSupervision: jest.fn(async () => true),
+  insertAuditLog: jest.fn(async () => true),
 }));
 jest.mock('../src/services/vad-runner', () => ({ schedule: jest.fn() }));
 jest.mock('../src/services/analytics', () => ({
@@ -69,6 +74,10 @@ beforeAll(async () => {
     actions.push({ Action: action, ...(params || {}) });
     return 'Response: Success\r\nMessage: ok';
   }) as never;
+  monitor.sendAwaitingEvent = (async (action: string, params: Record<string, unknown>) => {
+    actions.push({ Action: action, ...params });
+    return [{ Response: 'Success' }, { Event: 'OriginateResponse', Response: 'Success', Reason: '4' }];
+  }) as never;
   monitor.syncActiveCalls = (async () => monitor.activeCalls) as never;
   runtime.monitor = monitor;
   runtime.agentState = new AgentStateManager(monitor);
@@ -84,7 +93,11 @@ beforeAll(async () => {
     { Event: 'QueueMemberAdded', Queue: 'default', Interface: 'PJSIP/103', Paused: '0', Status: '1' },
   ]) await monitor.dispatchAsync(raw(h));
   monitor.dnd.add('102');
-  await runtime.agentState.login('101');
+  // Availability follows the phone: 101 and 102 are registered, then 101 joins its queue.
+  await runtime.agentState.onReachability('101', 'sip');
+  // Already registered, not a fresh registration: its paused member keeps the break.
+  await runtime.agentState.onReachability('102', 'sip', 'ami', 'sip');
+  await runtime.agentState.queueLogin('101');
 
   server = http.createServer();
   attachWebSocket(server);
@@ -173,7 +186,8 @@ describe('state frames are filtered by LIVE scope', () => {
       ['PJSIP/101', false, ''],
       ['PJSIP/102', true, 'lunch'],
     ]);
-    expect(Object.keys(s.agent_states)).toEqual(['101']);
+    // Every reachable extension in scope has availability now, not only queue agents.
+    expect(Object.keys(s.agent_states).sort()).toEqual(['101', '102']);
     expect(s.agent_states['101']).toMatchObject({ extension: '101', state: 'ready', reason_code: null, is_agent: true });
     expect(s.stats).toMatchObject({ total_extensions: 2, total_queues: 1 });
     c.ws.close();
@@ -229,7 +243,7 @@ describe('actions', () => {
     c.ws.send(JSON.stringify({ action: 'agent_logout', agent: '102' }));
     expect(await c.next('action_result')).toMatchObject({ success: false, message: 'Not allowed to control this agent' });
     c.ws.send(JSON.stringify({ action: 'agent_set_status', status: 'ready' }));
-    expect(await c.next('action_result')).toMatchObject({ success: true, message: 'Ready' });
+    expect(await c.next('action_result')).toMatchObject({ success: true, message: 'Available' });
     c.ws.close();
   });
 
@@ -380,6 +394,29 @@ describe('supervisor controls on a live call', () => {
     a.ws.close();
   });
 
+  it('supervision: a ringing supervisor phone does not hold up the socket', async () => {
+    // The ChanSpy Originate answers only when the supervisor picks up: hold it open.
+    const original = monitor.sendAwaitingEvent;
+    let pickUp!: () => void;
+    const answered = new Promise<void>((r) => (pickUp = r));
+    monitor.sendAwaitingEvent = (async (action: string, params: Record<string, unknown>, event: string) => {
+      await answered;
+      return original.call(monitor, action, params, event);
+    }) as never;
+    try {
+      const c = await open('/ws?token=sup');
+      await c.next('initial_state');
+      c.ws.send(JSON.stringify({ action: 'listen', supervisor: '200', target: '101' }));
+      c.ws.send(JSON.stringify({ action: 'sync_calls' }));
+      expect(await c.next('action_result')).toMatchObject({ action: 'sync_calls', success: true });
+      pickUp();
+      expect(await c.next('action_result')).toMatchObject({ action: 'listen', success: true });
+      c.ws.close();
+    } finally {
+      monitor.sendAwaitingEvent = original;
+    }
+  });
+
   it('owner resolution', () => {
     const sup = PRINCIPALS.sup as never;
     expect(transferSourceOwner(sup, monitor, '101')).toBe('101');
@@ -401,7 +438,7 @@ describe('agent board: a supervisor forces presence for agents in scope', () => 
     expect(runtime.agentState!.snapshot()['102']).toMatchObject({ state: 'not_ready', reason_code: 'lunch' });
 
     c.ws.send(JSON.stringify({ action: 'agent_set_status', status: 'ready', agent: '102' }));
-    expect(await c.next('action_result')).toMatchObject({ success: true, message: 'Ready' });
+    expect(await c.next('action_result')).toMatchObject({ success: true, message: 'Available' });
 
     const before = actions.length;
     c.ws.send(JSON.stringify({ action: 'agent_set_status', status: 'not_ready', reason_code: 'lunch', agent: '103' }));
@@ -410,6 +447,36 @@ describe('agent board: a supervisor forces presence for agents in scope', () => 
     expect(await c.next('action_result')).toMatchObject({ success: false, message: 'Not allowed to control this agent' });
     expect(actions.length).toBe(before);
     c.ws.close();
+  });
+});
+
+describe('a supervisor change is told to the agent and audited', () => {
+  it('the agent gets presence_changed_by and an audit row is written; a self change does neither', async () => {
+    const dbm = jest.requireMock('../src/db/db-manager') as { insertAuditLog: jest.Mock };
+    dbm.insertAuditLog.mockClear();
+    const agent = await open('/ws?token=agent');
+    await agent.next('initial_state');
+    const sup = await open('/ws?token=sup');
+    await sup.next('initial_state');
+
+    sup.ws.send(JSON.stringify({ action: 'agent_set_status', status: 'not_ready', reason_code: 'lunch', agent: '101' }));
+    expect(await sup.next('action_result')).toMatchObject({ success: true });
+    expect(await agent.next('presence_changed_by')).toMatchObject({
+      extension: '101', by: 'sup', action: 'agent_set_status', status: 'not_ready', reason_code: 'lunch', enabled: null,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(dbm.insertAuditLog).toHaveBeenCalledTimes(1);
+    expect(dbm.insertAuditLog.mock.calls[0].slice(0, 2)).toEqual(['update', 'agent_presence']);
+    expect(dbm.insertAuditLog.mock.calls[0][2]).toMatchObject({ actorExt: '200', actorUserId: 2, entityId: '101' });
+
+    // The agent's own change: no toast frame to itself, no audit row.
+    agent.ws.send(JSON.stringify({ action: 'agent_set_status', status: 'ready' }));
+    expect(await agent.next('action_result')).toMatchObject({ success: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(agent.frames.filter((f) => f.type === 'presence_changed_by')).toHaveLength(1);
+    expect(dbm.insertAuditLog).toHaveBeenCalledTimes(1);
+    agent.ws.close();
+    sup.ws.close();
   });
 });
 

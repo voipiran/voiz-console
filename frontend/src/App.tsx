@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { useWebSocket } from './hooks/useWebSocket';
+import { useWebSocket, type PresenceChangedBy } from './hooks/useWebSocket';
+import { usePauseReasons } from './hooks/usePauseReasons';
 import { useWebPhone } from './hooks/useWebPhone';
 import { WebPhoneProvider } from './contexts/WebPhoneContext';
 import { AgentPresenceProvider } from './contexts/AgentPresenceContext';
@@ -25,6 +26,7 @@ import { SettingsPanel } from './components/CRMSettingsModal';
 import { ContactsPanel } from './components/ContactsPanel';
 import { FloatingSoftphone } from './components/FloatingSoftphone';
 import { ProfilePanel } from './components/ProfilePanel';
+import { ProfileStatusButtonFace, ProfileStatusSection } from './components/ProfileStatusSection';
 import {
   Phone,
   PhoneCall,
@@ -63,7 +65,6 @@ import { CallStatusBadge } from './components/CallStatusBadge';
 import { callStatusLabel, isCallStatus } from './components/callStatus';
 import { memberExtension } from './components/queueMemberState';
 import { quickRanges, type DateRange } from './components/analyticsUtils';
-import { raiseFor } from './lib/api';
 import type { CallNotification } from './types';
 
 type TabType = 'dashboard' | 'extensions' | 'calls' | 'queues' | 'call-log' | 'contacts' | 'groups' | 'users' | 'analytics' | 'recordings' | 'logs' | 'settings' | 'profile';
@@ -200,10 +201,26 @@ function App({ onLogout }: AppProps) {
     setCallOutcome({ status: msg.status, linkedid: msg.linkedid, seq: outcomeSeq.current });
   }, []);
 
+  // A supervisor changed my status: say who and to what ("Omar set Break · Lunch").
+  const { labelFor: pauseLabelFor } = usePauseReasons();
+  const describePresenceChange = useCallback((m: PresenceChangedBy): string | null => {
+    let what: string;
+    if (m.action === 'agent_login') what = t('presenceToast.queueIn', 'logged you in to your queues');
+    else if (m.action === 'agent_logout') what = t('presenceToast.queueOut', 'logged you out of your queues');
+    else if (m.action === 'agent_wrapup_done') what = t('presenceToast.wrapDone', 'finished your wrap-up');
+    else if (m.status === 'not_ready') {
+      what = t('presenceToast.break', 'set you on Break · {{reason}}', { reason: pauseLabelFor(m.reason_code) || m.reason_code || '' });
+    } else if (m.status === 'ready') what = t('presenceToast.available', 'set you Available');
+    else if (m.status === 'dnd') what = m.enabled === false ? t('presenceToast.dndOff', 'turned your DND off') : t('presenceToast.dndOn', 'turned on Do Not Disturb for you');
+    else return null;
+    return `${m.by} ${what}`;
+  }, [t, pauseLabelFor]);
+
   const { state, connected, lastUpdate, notifications, sendAction, disconnect: wsDisconnect } = useWebSocket(token, {
     onAuthFailure: handleLogout,
     onCallNotificationNew: fetchNewNotifCount,
     onCallOutcome: handleCallOutcome,
+    describePresenceChange,
   });
   wsDisconnectRef.current = wsDisconnect;
   const navigate = useNavigate();
@@ -401,20 +418,12 @@ function App({ onLogout }: AppProps) {
   }, [fetchNewNotifCount]);
 
   const markAllRead = useCallback(async () => {
-    const ids = notifList.map((n) => n.id);
-    if (ids.length === 0) return;
-    const results = await Promise.all(ids.map((id) =>
-      fetchWithAuth(`/api/call-notifications/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status_flag: 'read' }),
-      }).then((r) => r.ok).catch(() => false)
-    ));
-    // Keep any row whose update failed, so it is not silently lost from view.
-    const failed = new Set(ids.filter((_, i) => !results[i]));
-    setNotifList((prev) => prev.filter((n) => failed.has(n.id)));
+    // One server-side update for every new notification, not just the page loaded here.
+    const ok = await fetchWithAuth('/api/call-notifications/mark-all-read', { method: 'POST' })
+      .then((r) => r.ok).catch(() => false);
+    if (ok) setNotifList([]);
     fetchNewNotifCount();
-  }, [notifList, fetchNewNotifCount]);
+  }, [fetchNewNotifCount]);
 
   // Auto-connect softphone when logged in and config is ready
   useEffect(() => {
@@ -568,7 +577,8 @@ function App({ onLogout }: AppProps) {
     }
     // Admin-only tabs. Without this a supervisor navigating to /logs gets a blank
     // <main> rather than being sent somewhere useful.
-    if (userRole !== 'admin' && ['logs', 'groups', 'users'].includes(activeTab)) {
+    // Teams: a supervisor gets Users (their agents), never Groups.
+    if (userRole !== 'admin' && (['logs', 'groups'].includes(activeTab) || (activeTab === 'users' && userRole !== 'supervisor'))) {
       navigate(`/${DEFAULT_TAB}`, { replace: true });
     }
   }, [userRole, activeTab, navigate]);
@@ -621,8 +631,7 @@ function App({ onLogout }: AppProps) {
 
   // The signed-in user's own live presence, for the softphone status bar
   // (AgentPresenceContext). The agent-state manager's snapshot is the truth; `is_agent`
-  // says whether the extension has queues (full Ready / Not-Ready band) or is a plain
-  // extension (Available / DND / Offline).
+  // says whether the extension has queues (it then also gets the queue-login switch).
   const myExt = String(getUser()?.extension || '');
   const myExtState = myExt ? state?.extensions?.[myExt] : undefined;
   const myPresence = myExt ? (state?.agent_states?.[myExt] ?? null) : null;
@@ -654,7 +663,7 @@ function App({ onLogout }: AppProps) {
       !isAgentRole && { tab: 'analytics', label: t('nav.analytics'), Icon: BarChart3 },
     ] },
     { key: 'admin', label: t('nav.admin', 'Admin'), items: [
-      isAdminRole && { tab: 'users', also: ['groups'], label: t('nav.teams', 'Teams'), Icon: Users },
+      (isAdminRole || role === 'supervisor') && { tab: 'users', also: isAdminRole ? ['groups'] : [], label: t('nav.teams', 'Teams'), Icon: Users },
       (isAdminRole || role === 'supervisor') && { tab: 'settings', label: t('header.settings', 'Settings'), Icon: Settings },
       isAdminRole && { tab: 'logs', label: t('nav.logs', 'Logs'), Icon: ScrollText },
     ] },
@@ -692,6 +701,7 @@ function App({ onLogout }: AppProps) {
 
   return (
     <WebPhoneProvider value={webPhone}>
+    <AgentPresenceProvider value={presenceValue}>
     <div className="app">
 
       {/* ── Header: 56px compact bar ── */}
@@ -817,8 +827,7 @@ function App({ onLogout }: AppProps) {
               aria-label={t('header.profile')}
               aria-expanded={profileMenuOpen}
             >
-              <span className="header-profile-avatar"><User size={16} /></span>
-              <span className="header-profile-name">{getUser()?.name || getUser()?.username || getUser()?.extension}</span>
+              <ProfileStatusButtonFace name={getUser()?.name || getUser()?.username || getUser()?.extension} />
               <ChevronDown size={14} className={`header-profile-caret${profileMenuOpen ? ' open' : ''}`} />
             </button>
 
@@ -838,9 +847,23 @@ function App({ onLogout }: AppProps) {
                       <span className="header-profile-role">{t(`users.roles.${getUser()?.role}`, { defaultValue: getUser()?.role || '' })}</span>
                       {getUser()?.extension && <span className="header-profile-ext">· {t('header.ext')} {getUser()?.extension}</span>}
                     </div>
+                    {getUser()?.role !== 'agent' && (
+                      <div className="header-profile-identity-meta header-profile-identity-monitor">
+                        <Monitor size={13} aria-hidden />
+                        {t('header.monitor')}: {(getUser()?.monitor_modes?.length ? getUser()!.monitor_modes! : ['listen'])
+                          .map(m => t(`users.monitor.${m}`, { defaultValue: m })).join(', ')}
+                      </div>
+                    )}
                   </div>
                   <ChevronRight size={15} className="header-profile-identity-go" />
                 </button>
+
+                {getUser()?.extension && (
+                  <>
+                    <div className="header-profile-divider" />
+                    <ProfileStatusSection />
+                  </>
+                )}
 
                 <div className="header-profile-divider" />
                 <div className="header-profile-section-label">{t('header.preferences')}</div>
@@ -860,19 +883,6 @@ function App({ onLogout }: AppProps) {
                     </button>
                   </div>
                 </div>
-
-                {/* Monitor mode (non-agent only) */}
-                {getUser()?.role !== 'agent' && (() => {
-                  const modes = getUser()?.monitor_modes;
-                  const modesLabel = (modes && modes.length > 0 ? modes : ['listen'])
-                    .map(m => t(`users.monitor.${m}`, { defaultValue: m })).join(', ');
-                  return (
-                    <div className="header-profile-row">
-                      <span className="header-profile-row-label"><Monitor size={15} />{t('header.monitor')}</span>
-                      <span className="header-profile-row-value">{modesLabel}</span>
-                    </div>
-                  );
-                })()}
 
                 <div className="header-profile-divider" />
 
@@ -954,21 +964,14 @@ function App({ onLogout }: AppProps) {
               onSupervisorAction={handleSupervisorAction}
               onSync={() => sendAction({ action: isAdminRole ? 'sync' : 'sync_calls' })}
               webrtcMap={Object.fromEntries(webrtcExtensions.map((e) => [e.extension, e.webrtc || 'no']))}
-              allowedDndExtensions={new Set(webrtcExtensions.map((e) => e.extension))}
-              onDndToggle={async (ext, enabled) => {
-                const res = await fetchWithAuth(`/api/extensions/${ext}/dnd`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ enabled }),
-                });
-                if (!res.ok) await raiseFor(res);
-                // DND state flip arrives via the WebSocket state broadcast.
-              }}
+              sendAction={sendAction}
+              onCallExtension={webPhone.config ? (ext) => { webPhone.setDialNumber(ext); setFloatingPhoneOpen(true); } : undefined}
             />
           )}
           {activeTab === 'calls' && (
             <ActiveCallsPanel
               calls={state?.active_calls || {}}
+              extensions={state?.extensions}
               onSupervisorAction={handleSupervisorAction}
               onHangup={(target) => sendAction({ action: 'hangup', target })}
               onTransfer={(source, destination, ext) => sendAction({ action: 'transfer', source, destination, ext })}
@@ -1006,7 +1009,7 @@ function App({ onLogout }: AppProps) {
           )}
           {activeTab === 'users' && (
             <UsersPanel
-              tabs={teamsTabs}
+              tabs={isAdminRole ? teamsTabs : undefined}
               pendingUserForm={pendingUserForm}
               onClearPendingUserForm={() => setPendingUserForm(null)}
               onOpenCreateGroup={(formSnapshot: PendingUserFormSnapshot, prefillGroupName?: string) => {
@@ -1033,17 +1036,16 @@ function App({ onLogout }: AppProps) {
           onSubmit={executeSupervisorAction}
         />
       )}
-      <AgentPresenceProvider value={presenceValue}>
-        <CallOutcomeProvider value={callOutcome}>
-          <FloatingSoftphone open={floatingPhoneOpen} onOpenChange={setFloatingPhoneOpen} />
-        </CallOutcomeProvider>
-      </AgentPresenceProvider>
+      <CallOutcomeProvider value={callOutcome}>
+        <FloatingSoftphone open={floatingPhoneOpen} onOpenChange={setFloatingPhoneOpen} />
+      </CallOutcomeProvider>
       <div className="notifications">
         {notifications.map((notification, index) => (
           <div key={index} className="notification">{notification}</div>
         ))}
       </div>
     </div>
+    </AgentPresenceProvider>
     </WebPhoneProvider>
   );
 }

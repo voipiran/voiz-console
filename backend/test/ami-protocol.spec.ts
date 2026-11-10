@@ -233,6 +233,37 @@ describe('AmiClient', () => {
     await srv.close();
   });
 
+  it('sendAwaitingEvent holds an Async Originate open until its OriginateResponse', async () => {
+    let answer: (() => void) | null = null;
+    const srv = await fakeAmi((a, sock) => {
+      const id = a.ActionID;
+      if (a.Action === 'Login') sock.write(raw({ Response: 'Success', ActionID: id }));
+      else if (a.Action === 'Ping') sock.write(raw({ Response: 'Success', ActionID: id, Ping: 'Pong' }));
+      else if (a.Action === 'Originate') {
+        sock.write(raw({ Response: 'Success', ActionID: id, Message: 'Originate successfully queued' }));
+        answer = () => sock.write(raw({ Event: 'OriginateResponse', ActionID: id, Response: 'Success', Reason: '4' }));
+      }
+    });
+    const events: string[] = [];
+    const client = new AmiClient({ onEvent: (r) => events.push(parse(r).Event) });
+    await client.connect('127.0.0.1', srv.port);
+    await client.login('u', 'p');
+
+    let settled = false;
+    const pending = client.sendAwaitingEvent('Originate', { Async: 'true' }, 'OriginateResponse', 5).then((r) => {
+      settled = true;
+      return r;
+    });
+    // Still ringing: the queued Success alone does not end it, and other actions go through.
+    expect(parse((await client.send('Ping'))!).Ping).toBe('Pong');
+    expect(settled).toBe(false);
+    answer!();
+    expect((await pending)!.map((m) => parse(m).Event || parse(m).Response)).toEqual(['Success', 'OriginateResponse']);
+    expect(events).toEqual([]);
+    await client.close();
+    await srv.close();
+  });
+
   it('answers null on timeout and when the connection drops', async () => {
     let lastSock: net.Socket | null = null;
     const srv = await fakeAmi((a, sock) => {
@@ -280,6 +311,95 @@ describe('AmiClient', () => {
     expect(mon.queues.get('800')!.calls_waiting).toBe(1);
     await mon.syncDndState();
     expect([...mon.dnd]).toEqual(['101']);
+    await mon.disconnect();
+    await srv.close();
+  });
+});
+
+describe('monitor: a booting Asterisk', () => {
+  /** A fake AMI whose QueueSummary errors while `loading` is true, as before app_queue loads. */
+  async function bootingAmi() {
+    const state = { loading: true, summaries: 0 };
+    const srv = await fakeAmi((a, sock) => {
+      const id = a.ActionID;
+      if (a.Action === 'QueueSummary') {
+        state.summaries += 1;
+        if (state.loading) {
+          sock.write(raw({ Response: 'Error', ActionID: id, Message: 'Invalid/unknown command' }));
+          return;
+        }
+        sock.write(raw({ Response: 'Success', ActionID: id, EventList: 'start' }));
+        sock.write(raw({ Event: 'QueueSummary', ActionID: id, Queue: '800', LoggedIn: '0', Available: '0', Callers: '0', HoldTime: '0', TalkTime: '0' }));
+        sock.write(raw({ Event: 'QueueSummaryComplete', ActionID: id, EventList: 'Complete' }));
+      } else if (a.Action === 'QueueStatus') {
+        sock.write(raw({ Response: 'Success', ActionID: id, EventList: 'start' }));
+        sock.write(raw({ Event: 'QueueStatusComplete', ActionID: id, EventList: 'Complete' }));
+      } else {
+        sock.write(raw({ Response: 'Success', ActionID: id }));
+      }
+    });
+    const mon = new AMIExtensionsMonitor({ host: '127.0.0.1', port: srv.port, username: 'u', secret: 'p' });
+    return { srv, mon, state };
+  }
+
+  it('an unanswered QueueSummary is a failed sync, not "no queues"', async () => {
+    const { srv, mon, state } = await bootingAmi();
+    expect(await mon.connect()).toBe(true);
+    expect(await mon.syncQueueStatus()).toBe(false);
+    expect(await mon.getQueueSummary()).toEqual({});
+    state.loading = false;
+    expect(await mon.syncQueueStatus()).toBe(true);
+    expect(mon.queues.has('800')).toBe(true);
+    await mon.disconnect();
+    await srv.close();
+  });
+
+  it('retries the sync until app_queue answers', async () => {
+    const { srv, mon, state } = await bootingAmi();
+    await mon.connect();
+    const before = state.summaries;
+    setTimeout(() => { state.loading = false; }, 30);
+    expect(await mon.syncQueuesWhenReady(50, 0.01)).toBe(true);
+    expect(state.summaries).toBeGreaterThan(before + 1);
+    expect(mon.queues.has('800')).toBe(true);
+    await mon.disconnect();
+    await srv.close();
+  });
+
+  it('gives up after its attempts, and stops at once when the monitor is stopped', async () => {
+    const { srv, mon, state } = await bootingAmi();
+    await mon.connect();
+    expect(await mon.syncQueuesWhenReady(2, 0.01)).toBe(false);
+    await mon.disconnect();
+    const asked = state.summaries;
+    expect(await mon.syncQueuesWhenReady(2, 0.01)).toBe(false);
+    expect(state.summaries).toBe(asked);
+    await srv.close();
+  });
+
+  it('logs in again when the booting Asterisk dropped the session', async () => {
+    const { srv, mon, state } = await bootingAmi();
+    state.loading = false;
+    await mon.connect();
+    srv.sockets[0].destroy();
+    for (let i = 0; i < 100 && mon.connected; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(mon.connected).toBe(false);
+    expect(await mon.syncQueuesWhenReady(5, 0.01)).toBe(true);
+    expect(srv.sockets.length).toBe(2);
+    await mon.disconnect();
+    await srv.close();
+  });
+
+  it('a close during the startup sync still ends in a reconnect', async () => {
+    const { srv, mon, state } = await bootingAmi();
+    state.loading = false;
+    await mon.connect();
+    srv.sockets[0].destroy();
+    for (let i = 0; i < 100 && mon.connected; i++) await new Promise((r) => setTimeout(r, 5));
+    const loop = jest.spyOn(mon, 'reconnectLoop').mockResolvedValue();
+    await mon.startEvents();
+    expect(mon.running).toBe(true);
+    expect(loop).toHaveBeenCalledTimes(1);
     await mon.disconnect();
     await srv.close();
   });

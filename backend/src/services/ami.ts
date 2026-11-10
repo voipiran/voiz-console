@@ -112,6 +112,19 @@ export const EVENT_TIMEOUT = 1.0;
 export const AMI_RECONNECT_MIN_DELAY = 3.0; // seconds, first backoff after an unexpected disconnect
 export const AMI_RECONNECT_MAX_DELAY = 30.0; // seconds, backoff ceiling
 export const QUEUE_RECONCILE_INTERVAL = 10.0; // seconds between waiting-caller reconciles
+// Queue sync retries: up to a minute for app_queue to load after an Asterisk start.
+export const QUEUE_SYNC_ATTEMPTS = 30;
+export const QUEUE_SYNC_RETRY_SECS = 2;
+export const SPY_RING_TIMEOUT = 30.0; // seconds the supervisor's phone rings for listen / whisper / barge
+
+/** OriginateResponse `Reason` (the dialled channel's last control frame), for the error log. */
+const ORIGINATE_REASONS: Readonly<Record<string, string>> = {
+  '0': "the supervisor's phone could not be called",
+  '1': "the supervisor's phone hung up",
+  '3': "the supervisor's phone was not answered",
+  '5': "the supervisor's phone is busy",
+  '8': 'the call could not be placed (congestion)',
+};
 
 export const DIALPLAN_CTX: ReadonlySet<string> = new Set([
   's', 'h', 'i', 't', 'o', 'a', 'e', 'start', 'hangup', 'invalid', 'timeout',
@@ -457,8 +470,16 @@ export class AMIExtensionsMonitor {
   /** Start processing live events (the Python `running = True` + reader task). */
   async startEvents(): Promise<void> {
     this.stopRequested = false;
-    await this.sendAsync('Events', { EventMask: 'on' });
     this.running = true;
+    if (this.connected) {
+      await this.sendAsync('Events', { EventMask: 'on' });
+    } else {
+      // Lost during the startup sync (a booting Asterisk can drop a fresh session): the close
+      // came before `running`, so it started no reconnect. Start one now, or OpDesk stays
+      // without AMI until the next restart.
+      log.warning('AMI connection lost before live events started');
+      void this.reconnectLoop();
+    }
     this.ensureQueueReconcile();
   }
 
@@ -487,6 +508,8 @@ export class AMIExtensionsMonitor {
         if (await this.connect()) {
           log.info('AMI reconnected');
           try {
+            // Queues first: this also waits out a still-booting Asterisk.
+            await this.syncQueuesWhenReady();
             await this.syncExtensionStatuses();
             await this.syncActiveCalls();
             await this.syncDndState();
@@ -538,6 +561,23 @@ export class AMIExtensionsMonitor {
       if (msgs.length && /Success/i.test(msgs[0]['Response'] || '')) log.warning('%s: Timeout waiting for %s', action, complete);
     }
     return msgs;
+  }
+
+  /**
+   * Send an action answered by a Response and then `event` (see AmiClient.sendAwaitingEvent),
+   * parsed; null when not connected or nothing came back.
+   */
+  async sendAwaitingEvent(
+    action: string,
+    params: Record<string, unknown>,
+    event: string,
+    timeout = AMI_TIMEOUT,
+  ): Promise<AmiMessage[] | null> {
+    const client = this.client;
+    if (!this.connected || !client) return null;
+    const raw = await client.sendAwaitingEvent(action, params, event, timeout);
+    if (raw === null) log.error('Send %s failed: no response', action);
+    return raw ? raw.map((m) => parse(m)) : null;
   }
 
   /** Every wire event goes through here, in arrival order. */
@@ -767,6 +807,11 @@ export class AMIExtensionsMonitor {
     const family = await this.dbGetFamily('DND', true);
     if (family === null) return;
     this.dnd = new Set(Object.entries(family).filter(([, v]) => pyStr(v).trim()).map(([k]) => k));
+  }
+
+  /** The registrar's contact rows as `database show` prints them; null when AMI is down. */
+  async registrarContactRows(): Promise<string | null> {
+    return this.sendAsync('Command', { Command: 'database show registrar/contact' });
   }
 
   async dbPut(family: string, key: string, val: string): Promise<boolean> {
@@ -2507,14 +2552,23 @@ export class AMIExtensionsMonitor {
 
   /** {queue: {Available, LoggedIn, Callers, HoldTime, TalkTime, LongestHoldTime}} */
   async getQueueSummary(): Promise<Record<string, Record<string, string>>> {
+    return (await this.readQueueSummary()) ?? {};
+  }
+
+  /**
+   * Summary of all queues, or null when AMI gave no answer or an error. Right after Asterisk
+   * starts, app_queue may not be loaded yet and QueueSummary errors: that is "unknown", not
+   * "no queues".
+   */
+  async readQueueSummary(): Promise<Record<string, Record<string, string>> | null> {
     const msgs = await this.sendActionWithEvents('QueueSummary', null, 'QueueSummaryComplete');
     if (!msgs || !msgs.length) {
       log.warning('QueueSummary: No response from AMI');
-      return {};
+      return null;
     }
     if (!/Success/i.test(msgs[0]['Response'] || '')) {
       log.warning('QueueSummary: AMI returned error');
-      return {};
+      return null;
     }
     const out: Record<string, Record<string, string>> = {};
     for (const m of msgs.slice(1)) {
@@ -2646,9 +2700,34 @@ export class AMIExtensionsMonitor {
     return [...new Set(this.memberInterfacesFor(ext).map((m) => m.queue).filter(Boolean))].sort();
   }
 
-  /** Populate queues / queue_members / queue_entries from QueueSummary + QueueStatus. */
-  async syncQueueStatus(): Promise<void> {
-    const summary = await this.getQueueSummary();
+  /**
+   * The queue sync, retried (logging in again if need be) until Asterisk can answer it. When
+   * OpDesk and Asterisk start together, or Asterisk restarts under a running OpDesk, AMI
+   * accepts the login before app_queue has loaded and QueueSummary errors. Presence hydrates
+   * from this sync: run on an empty one, agents come up outside their queues, and a member
+   * Asterisk then restores paused for wrap-up stays paused with no timer to release it.
+   * False when it never answered, or the monitor was stopped meanwhile.
+   */
+  async syncQueuesWhenReady(attempts = QUEUE_SYNC_ATTEMPTS, retrySecs = QUEUE_SYNC_RETRY_SECS): Promise<boolean> {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (this.stopRequested) return false;
+      // A booting Asterisk can also drop the fresh AMI session: log in again before asking.
+      if (!this.connected) await this.connect();
+      if (this.connected && (await this.syncQueueStatus())) return true;
+      log.warning('Queue sync attempt %d/%d failed (app_queue not loaded yet?) — retrying in %ds', attempt, attempts, retrySecs);
+      if (attempt < attempts) await sleep(retrySecs);
+    }
+    log.error('Queue sync failed after %d attempts: presence starts without queue members', attempts);
+    return false;
+  }
+
+  /**
+   * Populate queues / queue_members / queue_entries from QueueSummary + QueueStatus. False
+   * (and nothing changed) when Asterisk could not answer, e.g. app_queue still loading.
+   */
+  async syncQueueStatus(): Promise<boolean> {
+    const summary = await this.readQueueSummary();
+    if (summary === null) return false;
 
     // Prune queues the PBX no longer has (guarded: an empty read must not wipe everything).
     const names = Object.keys(summary);
@@ -2714,6 +2793,7 @@ export class AMIExtensionsMonitor {
       }
     }
     log.info(`Synced ${this.queues.size} queues, ${this.queueMembers.size} members, ${this.queueEntries.size} waiting callers`);
+    return true;
   }
 
   /** One QueueStatus `QueueMember` event -> the item addQueueMember takes. */
@@ -3000,15 +3080,26 @@ export class AMIExtensionsMonitor {
     const mode = label.toLowerCase();
     // ChanSpy matches a channel-name PREFIX: `PJSIP/101` would also spy on PJSIP/1010-….
     // The full channel name (PJSIP/101-0000002a) names this call's leg and nothing else.
-    const resp = await this.sendAsync('Originate', {
-      Channel: this.deviceInterface(supervisor),
-      ChannelId: spyId,
-      Application: 'ChanSpy',
-      Data: `${ch},${options}`,
-      CallerID: `${label} <${target}>`,
-      Timeout: '30000',
-    });
-    if (resp && resp.includes('Response: Success')) {
+    // Async, then wait for OriginateResponse: it comes once the supervisor picks up (or the
+    // ring fails). A synchronous Originate held the whole AMI session for the ring -- every
+    // other action timed out meanwhile -- and its reply came after the 5 s AMI default, so
+    // a supervisor slower than that read as "Unknown error".
+    const msgs = await this.sendAwaitingEvent(
+      'Originate',
+      {
+        Channel: this.deviceInterface(supervisor),
+        ChannelId: spyId,
+        Application: 'ChanSpy',
+        Data: `${ch},${options}`,
+        CallerID: `${label} <${target}>`,
+        Timeout: String(SPY_RING_TIMEOUT * 1000),
+        Async: 'true',
+      },
+      'OriginateResponse',
+      SPY_RING_TIMEOUT + AMI_TIMEOUT,
+    );
+    const answer = msgs?.find((msg) => msg['Event'] === 'OriginateResponse');
+    if (answer && /^success$/i.test(answer['Response'] || '')) {
       log.info(`✅ ${supervisor} is now ${mode}ing ${target}'s call`);
       try {
         await dbm.recordSupervision(spyId, {
@@ -3023,7 +3114,12 @@ export class AMIExtensionsMonitor {
       }
       return true;
     }
-    log.error(`❌ ${label} failed: ${dget(parse(resp || ''), 'Message', 'Unknown error')}`);
+    const why = answer
+      ? ORIGINATE_REASONS[answer['Reason'] || ''] || `reason ${answer['Reason'] || '?'}`
+      : msgs?.length
+        ? dget(msgs[0], 'Message', 'no answer from Asterisk')
+        : 'no response from Asterisk';
+    log.error(`❌ ${label} failed: ${why}`);
     return false;
   }
 

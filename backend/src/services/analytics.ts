@@ -192,13 +192,29 @@ export function realQueueCond(leg = 'first_leg'): string {
   return REAL_QUEUE_LEG_SQL.split('{leg}').join(leg);
 }
 
-// The SQL twin of the answered rule queue rows use in code (queueRowAnswered): Asterisk can
-// mark a leg ANSWERED that carried no audio, and leave a real conversation under another
-// disposition, so either signal counts. Aggregations done in SQL ask the same question, or a
-// heatmap cell disagrees with the queue's abandoned total for the same period.
-export const ANSWERED_SQL = "(last_leg.disposition = 'ANSWERED' OR last_leg.billsec > 0)";
+// The SQL twin of the answered rule queue rows use in code (queueRowAnswered). Aggregations
+// done in SQL ask the same question, or a heatmap cell disagrees with the queue's abandoned
+// total for the same period.
+//
+// An AGENT answered only when a leg says ANSWERED, has talk time AND has someone on its
+// destination channel. FreePBX answers a queue caller itself for music on hold, so the
+// caller's leg carries billsec whether or not anyone picked up -- and each member that only
+// RANG leaves a caller leg with billsec, the member's channel and NO ANSWER / BUSY / FAILED.
+// call_log.partyAnsweredLeg is the twin.
+const ANSWERED_LEG = (leg: string): string =>
+  `(${leg}disposition = 'ANSWERED' AND ${leg}billsec > 0 AND COALESCE(${leg}dstchannel, '') <> '')`;
+export const ANSWERED_SQL = ANSWERED_LEG('last_leg.');
 // The same rule where there is no joined last_leg to name -- a single-table scan over cdr.
-export const QUEUE_ANSWERED_BARE_SQL = "disposition = 'ANSWERED' OR billsec > 0";
+export const QUEUE_ANSWERED_BARE_SQL = ANSWERED_LEG('');
+// Which leg is `last_leg`: the last one an agent answered, else the last one. A ringall queue
+// leaves a leg per member it rang, so the plain MAX(sequence) was often a member who did NOT
+// answer. Same as call-log's out_seq.
+export const OUTCOME_SEQ_SQL = `COALESCE(MAX(CASE WHEN ${ANSWERED_LEG('')} THEN sequence END), MAX(sequence))`;
+// last_leg's billsec and disposition as the KPIs must read them: no agent, no talk time, and
+// an ANSWERED that only the PBX gave (hold music) is not an answer.
+export const LAST_LEG_BILLSEC_SQL = `(CASE WHEN ${ANSWERED_SQL} THEN last_leg.billsec ELSE 0 END)`;
+export const LAST_LEG_DISPOSITION_SQL =
+  `(CASE WHEN ${ANSWERED_SQL} THEN 'ANSWERED' WHEN last_leg.disposition = 'ANSWERED' THEN 'NO ANSWER' ELSE last_leg.disposition END)`;
 
 /** A list of extensions/queues a caller may see; null = unrestricted (admin, API key). */
 export type Scope = readonly (string | number)[] | null | undefined;
@@ -427,10 +443,10 @@ export function queueCdrSql(extraSql = ''): string {
         first_leg.src,
         first_leg.dst                   AS queue_ext,
         first_leg.duration              AS total_dur,
-        last_leg.billsec                AS billsec,
-        last_leg.disposition            AS disposition,
+        ${LAST_LEG_BILLSEC_SQL}         AS billsec,
+        ${LAST_LEG_DISPOSITION_SQL}     AS disposition,
         GREATEST(CASE
-            WHEN last_leg.billsec > 0
+            WHEN ${ANSWERED_SQL}
             THEN first_leg.duration - last_leg.billsec
             ELSE first_leg.duration
         END, 0)                         AS wait_secs,
@@ -452,7 +468,7 @@ export function queueCdrSql(extraSql = ''): string {
             SELECT c.*
             FROM cdr c
             JOIN (
-                SELECT linkedid, MAX(sequence) AS max_seq
+                SELECT linkedid, ${OUTCOME_SEQ_SQL} AS max_seq
                 FROM cdr
                 WHERE calldate >= ?
                   AND calldate < DATE_ADD(?, INTERVAL 2 DAY)
@@ -504,10 +520,10 @@ export function allCdrSql(extraSql = ''): string {
         first_leg.src,
         first_leg.dst                   AS dst,
         first_leg.duration              AS total_dur,
-        last_leg.billsec                AS billsec,
-        last_leg.disposition            AS disposition,
+        ${LAST_LEG_BILLSEC_SQL}         AS billsec,
+        ${LAST_LEG_DISPOSITION_SQL}     AS disposition,
         GREATEST(CASE
-            WHEN first_leg.lastapp = 'Queue' AND last_leg.billsec > 0
+            WHEN first_leg.lastapp = 'Queue' AND ${ANSWERED_SQL}
             THEN first_leg.duration - last_leg.billsec
             WHEN first_leg.lastapp = 'Queue'
             THEN first_leg.duration
@@ -536,7 +552,7 @@ export function allCdrSql(extraSql = ''): string {
             SELECT c.*
             FROM cdr c
             JOIN (
-                SELECT linkedid, MAX(sequence) AS max_seq
+                SELECT linkedid, ${OUTCOME_SEQ_SQL} AS max_seq
                 FROM cdr
                 WHERE calldate >= ?
                   AND calldate < DATE_ADD(?, INTERVAL 2 DAY)
@@ -1625,7 +1641,7 @@ export async function computeHourlyHeatmap(
                 SELECT c.*
                 FROM cdr c
                 JOIN (
-                    SELECT linkedid, MAX(sequence) AS max_seq
+                    SELECT linkedid, ${OUTCOME_SEQ_SQL} AS max_seq
                     FROM cdr
                     WHERE calldate >= ?
                       AND calldate < DATE_ADD(?, INTERVAL 2 DAY)
@@ -1942,11 +1958,11 @@ export async function refreshHourlyBucket(
       `
         SELECT
             first_leg.dst            AS queue_ext,
-            last_leg.disposition,
-            GREATEST(CASE WHEN last_leg.billsec>0
+            ${LAST_LEG_DISPOSITION_SQL} AS disposition,
+            GREATEST(CASE WHEN ${ANSWERED_SQL}
                  THEN first_leg.duration - last_leg.billsec
                  ELSE first_leg.duration END, 0) AS wait_secs,
-            last_leg.billsec
+            ${LAST_LEG_BILLSEC_SQL} AS billsec
         FROM
             (SELECT c.* FROM cdr c
              JOIN (
@@ -1958,7 +1974,7 @@ export async function refreshHourlyBucket(
             ) first_leg
         JOIN (SELECT c.* FROM cdr c
               JOIN (
-                SELECT linkedid, MAX(sequence) AS ms
+                SELECT linkedid, ${OUTCOME_SEQ_SQL} AS ms
                 FROM cdr
                 WHERE calldate >= ? AND calldate < ?
                 GROUP BY linkedid
@@ -2144,11 +2160,10 @@ export async function startAggregationLoop(): Promise<void> {
 export const ACTIVE_STATES = ['ready', 'on_call', 'wrap_up', 'not_ready'] as const;
 
 /**
- * Seconds between two segments before they count as two separate logins. A transition
- * closes one segment and opens the next on one connection, so a same-session gap is 0-1s
- * of clock; anything longer is a real logout the agent came back from.
+ * Seconds between two segments before they count as two separate sessions: a phone back
+ * within a minute (Wi-Fi blip, browser reload) is the same session; the gap counts nowhere.
  */
-export const SESSION_GAP_SECS = 5;
+export const SESSION_GAP_SECS = 60;
 
 /**
  * Ceiling on one adherence read. Segments are totalled here, so they all cross the wire; a
@@ -2170,6 +2185,8 @@ export interface Segment {
   source: string | null;
   started_at: Date;
   ended_at: Date | null;
+  /** A piece of idle time with DND on (overlayDnd): state 'dnd', but it counts as idle. */
+  idle_dnd?: boolean;
 }
 
 /**
@@ -2432,11 +2449,228 @@ export function clampedSecs(seg: Segment, winStart: Date, winEnd: Date, now: Dat
   return Math.max(0, Math.trunc(wallDiffSecs(end, start)));
 }
 
+/** The open/close segment tables that sit beside agent_activity. */
+export type SideTable = 'extension_registration' | 'queue_login' | 'extension_dnd';
+
+/** A plain [start, end) interval of one side table, raw (unclamped). */
+export interface SideSegment {
+  ext: string;
+  started_at: Date;
+  ended_at: Date | null;
+  via?: string | null;
+}
+
+/**
+ * Rows of a side table overlapping the window, by extension. Unlike segmentRows a failure
+ * is logged and read as "no rows": these columns enrich the report, they must not take
+ * the whole adherence page down on an install whose migration has not run yet.
+ */
+export async function sideSegments(
+  table: SideTable,
+  windowStart: string,
+  windowEnd: string,
+  opts: { allowedAgents?: Scope; agentExt?: string | null } = {},
+): Promise<Map<string, SideSegment[]>> {
+  const out = new Map<string, SideSegment[]>();
+  let cond: string;
+  let params: Params;
+  if (opts.agentExt) [cond, params] = ['AND ext = ?', [opts.agentExt]];
+  else [cond, params] = scopeAgentCondition(opts.allowedAgents ?? null, 'ext');
+  const viaCol = table === 'extension_registration' ? ', via' : '';
+  try {
+    const rows = await query(
+      `SELECT ext, started_at, ended_at${viaCol}
+         FROM ${table}
+        WHERE started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)
+        ${cond}
+        ORDER BY started_at DESC
+        ${SEGMENT_LIMIT_SQL}`,
+      [windowEnd, windowStart, ...params],
+    );
+    for (const r of rows.reverse()) {
+      pushTo(out, pyStr(r.ext), {
+        ext: pyStr(r.ext),
+        started_at: r.started_at as Date,
+        ended_at: (r.ended_at as Date | null) ?? null,
+        via: (r.via as string | undefined) ?? null,
+      });
+    }
+  } catch (e) {
+    log.warning('adherence %s: %s', table, e);
+  }
+  return out;
+}
+
+/** Extensions that are queue agents (in a group that has queues). Empty on error. */
+export async function agentsWithQueues(): Promise<Set<string>> {
+  try {
+    const rows = await query(
+      `SELECT DISTINCT ga.agent_ext
+         FROM group_agents ga
+         JOIN group_queues gq ON gq.group_id = ga.group_id
+         JOIN queues q ON q.extension = gq.queue_extension`,
+    );
+    return new Set(rows.map((r) => pyStr(r.agent_ext)).filter(Boolean));
+  } catch (e) {
+    log.warning('adherence agents_with_queues: %s', e);
+    return new Set();
+  }
+}
+
+/** Clamp a [start, end) to the window; null when nothing of it is inside. */
+function clampInterval(start: Date, end: Date | null, winStart: Date, winEnd: Date, now: Date): [Date, Date] | null {
+  const s0 = maxDt(start, winStart);
+  const e0 = minDt(end || now, winEnd);
+  return wall(e0) > wall(s0) ? [s0, e0] : null;
+}
+
+/** Seconds of the side segments inside the window. */
+export function sideSecs(segs: SideSegment[] | undefined, winStart: Date, winEnd: Date, now: Date): number {
+  let total = 0;
+  for (const s of segs ?? []) {
+    const iv = clampInterval(s.started_at, s.ended_at, winStart, winEnd, now);
+    if (iv) total += Math.max(0, Math.trunc(wallDiffSecs(iv[1], iv[0])));
+  }
+  return total;
+}
+
+/** Seconds where `seg` (clamped) overlaps any of `others` (clamped). */
+export function overlapSecs(seg: Segment, others: SideSegment[] | undefined, winStart: Date, winEnd: Date, now: Date): number {
+  if (!others || !others.length) return 0;
+  const a = clampInterval(seg.started_at, seg.ended_at, winStart, winEnd, now);
+  if (!a) return 0;
+  let total = 0;
+  for (const o of others) {
+    const b = clampInterval(o.started_at, o.ended_at, winStart, winEnd, now);
+    if (!b) continue;
+    const s0 = maxDt(a[0], b[0]);
+    const e0 = minDt(a[1], b[1]);
+    if (wall(e0) > wall(s0)) total += Math.trunc(wallDiffSecs(e0, s0));
+  }
+  return total;
+}
+
+/**
+ * Outbound calls and their talk time per extension for the window, from the call log (one
+ * read for everyone). Answered outbound calls only count toward talk. A CDR failure reads
+ * as no figures, never as a failed report.
+ */
+export async function outboundByExtension(df: string, dt: string, allowedAgents: Scope): Promise<Map<string, { calls: number; talk_secs: number }>> {
+  const out = new Map<string, { calls: number; talk_secs: number }>();
+  try {
+    const inScope = allowedAgents === null || allowedAgents === undefined ? null : new Set(allowedAgents.map(String));
+    for (const r of await periodCallLogRows(df, dt, null, allowedAgents ?? null)) {
+      const ext = sgetOr(r, 'extension');
+      if (!ext || !isDigits(ext) || (inScope && !inScope.has(ext))) continue;
+      if (dget<unknown>(r, 'call_type', '') !== 'OUT') continue;
+      let o = out.get(ext);
+      if (!o) out.set(ext, (o = { calls: 0, talk_secs: 0 }));
+      o.calls += 1;
+      if (rowAnswered(r)) o.talk_secs += intOr0(dget(r, 'talk', null));
+    }
+  } catch (e) {
+    log.warning('adherence outbound figures: %s', e);
+  }
+  return out;
+}
+
 /** 'YYYY-MM-DD' + 'HH:MM:SS' as a naive local datetime (the window bounds). */
 function windowDt(dateStr: string, time: string): Date {
   const [y, mo, d] = ymdParts(dateStr);
   const [h, mi, s] = time.split(':').map(Number);
   return new Date(y, mo - 1, d, h, mi, s);
+}
+
+/** max_break_secs per reason code, for the reasons that have a window. */
+function breakWindows(reasons: Iterable<Row>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of reasons) {
+    const w = intOr0(dget(r, 'max_break_secs', null));
+    if (w > 0) out.set(pyStr(r.code), w);
+  }
+  return out;
+}
+
+/**
+ * Cap offline-on-a-break rows at the reason's window, measured from the break's start (a
+ * break and its offline stretches of one reason are one chain). Past the window it is
+ * offline: dropped, so a laptop closed on a break does not stretch the shift's logout.
+ */
+export function capBreakOffline(segments: Segment[], windows: Map<string, number>, now: Date): Segment[] {
+  const out: Segment[] = [];
+  let chainStart: Date | null = null;
+  let chainReason: string | null = null;
+  let chainEnd: Date | null = null;
+  for (const seg of segments) {
+    if (seg.state === 'not_ready' || seg.state === 'break_offline') {
+      const r = seg.reason_code || 'unknown';
+      const joined = chainStart !== null && chainReason === r && chainEnd !== null
+        && wallDiffSecs(seg.started_at, chainEnd) <= SESSION_GAP_SECS;
+      if (!joined) chainStart = seg.started_at;
+      chainReason = r;
+      chainEnd = seg.ended_at || now;
+    } else {
+      chainStart = null;
+      chainReason = null;
+      chainEnd = null;
+    }
+    if (seg.state !== 'break_offline') {
+      out.push(seg);
+      continue;
+    }
+    const window = windows.get(seg.reason_code || '') ?? 0;
+    if (!(window > 0) || chainStart === null) continue;
+    const allowedEnd = wallAdd(chainStart, window);
+    if (wall(allowedEnd) <= wall(seg.started_at)) continue;
+    const segEnd = seg.ended_at || now;
+    out.push(wall(segEnd) <= wall(allowedEnd) ? seg : { ...seg, ended_at: allowedEnd });
+  }
+  return out;
+}
+
+/**
+ * Cut idle time at the DND stretches: each overlap becomes a 'dnd' piece with `idle_dnd`,
+ * so a DND the agent never returns from ends the shift at the DND's start, and one they
+ * return from stays idle time. Other states pass through.
+ */
+export function overlayDnd(segments: Segment[], dnd: SideSegment[] | undefined, now: Date): Segment[] {
+  if (!dnd || !dnd.length) return segments;
+  const flags = [...dnd].sort((x, y) => wall(x.started_at) - wall(y.started_at));
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    if (seg.state !== 'ready') {
+      out.push(seg);
+      continue;
+    }
+    const end = seg.ended_at;
+    const endW = wall(end || now);
+    let cur: Date | null = seg.started_at;
+    for (const f of flags) {
+      if (cur === null) break;
+      const fEndW = f.ended_at ? wall(f.ended_at) : Infinity;
+      if (fEndW <= wall(cur) || wall(f.started_at) >= endW) continue;
+      if (wall(f.started_at) > wall(cur)) {
+        out.push({ ...seg, started_at: cur, ended_at: f.started_at });
+        cur = f.started_at;
+      }
+      const pieceEnd: Date | null = f.ended_at && fEndW < endW ? f.ended_at : end;
+      out.push({ ...seg, state: 'dnd', idle_dnd: true, started_at: cur, ended_at: pieceEnd });
+      cur = pieceEnd === end ? null : pieceEnd;
+    }
+    if (cur !== null) out.push({ ...seg, started_at: cur, ended_at: end });
+  }
+  return out;
+}
+
+/** Raw rows -> what sessions are built from: split at the shift, breaks capped, DND overlaid. */
+function preparedSegments(
+  segs: Segment[],
+  boundary: number | null,
+  windows: Map<string, number>,
+  dnd: SideSegment[] | undefined,
+  now: Date,
+): Segment[] {
+  return overlayDnd(capBreakOffline(splitAtShiftBoundary(segs, boundary, now), windows, now), dnd, now);
 }
 
 /**
@@ -2472,7 +2706,7 @@ export async function computeAgentAdherence(
   // Reason metadata for the productive split + labels.
   const reasonMeta = new Map<string, Row>();
   try {
-    for (const r of await query('SELECT code, label, productive, color, is_system FROM pause_reasons')) {
+    for (const r of await query('SELECT code, label, productive, color, is_system, max_break_secs FROM pause_reasons')) {
       reasonMeta.set(r.code, r);
     }
   } catch (e) {
@@ -2482,12 +2716,21 @@ export async function computeAgentAdherence(
   const boundary = await shiftBoundaryMinutes();
   // Map, not an object: extensions are numeric strings and must keep first-seen order.
   const byAgent = new Map<string, Segment[]>();
-  for (const s of splitAtShiftBoundary(await segmentRows(windowStart, windowEnd, { allowedAgents }), boundary, now)) {
-    pushTo(byAgent, pyStr(s.agent_ext), s);
-  }
+  for (const s of await segmentRows(windowStart, windowEnd, { allowedAgents })) pushTo(byAgent, pyStr(s.agent_ext), s);
 
+  const [registration, queueLogins, dndFlags, outbound, agentQueues] = await Promise.all([
+    sideSegments('extension_registration', windowStart, windowEnd, { allowedAgents }),
+    sideSegments('queue_login', windowStart, windowEnd, { allowedAgents }),
+    sideSegments('extension_dnd', windowStart, windowEnd, { allowedAgents }),
+    outboundByExtension(df, dt, allowedAgents),
+    agentsWithQueues(),
+  ]);
+
+  const windows = breakWindows(reasonMeta.values());
   const result: Row[] = [];
-  for (const [ext, segs] of byAgent) {
+  for (const [ext, rawSegs] of byAgent) {
+    const dndIntervals = dndFlags.get(ext);
+    const segs = preparedSegments(rawSegs, boundary, windows, dndIntervals, now);
     const sessions = splitSessions(segs, winStartDt, winEndDt, now, boundary);
     if (!sessions.length) continue;
 
@@ -2495,15 +2738,31 @@ export async function computeAgentAdherence(
       ready_secs: 0, on_call_secs: 0, wrap_secs: 0, not_ready_secs: 0,
       break_secs: 0, dnd_secs: 0, productive_not_ready_secs: 0,
     };
+    let legacyDnd = 0;
+    let idleDnd = 0;
+    let dndFlagSecs = 0;
+    let breakOfflineCounted = 0;
     const breakdown = new Map<string, { code: string; label: unknown; productive: boolean; secs: number }>();
     for (const session of sessions) {
       for (const seg of session.segments) {
         const secs = clampedSecs(seg, winStartDt, winEndDt, now);
-        const state = seg.state;
+        let state = seg.state;
+        if (seg.idle_dnd) {
+          a.ready_secs += secs;
+          idleDnd += secs;
+          dndFlagSecs += secs;
+          continue;
+        }
+        if (state !== 'dnd') dndFlagSecs += overlapSecs(seg, dndIntervals, winStartDt, winEndDt, now);
+        if (state === 'break_offline') {
+          // Already capped at the reason's window: it is that break.
+          breakOfflineCounted += secs;
+          state = 'not_ready';
+        }
         if (state === 'ready') a.ready_secs += secs;
         else if (state === 'on_call') a.on_call_secs += secs;
         else if (state === 'wrap_up') a.wrap_secs += secs;
-        else if (state === 'dnd') a.dnd_secs += secs;
+        else if (state === 'dnd') legacyDnd += secs;
         else if (state === 'not_ready') {
           a.not_ready_secs += secs;
           const code = seg.reason_code || 'unknown';
@@ -2527,26 +2786,40 @@ export async function computeAgentAdherence(
       }
     }
 
-    const loggedIn = a.ready_secs + a.on_call_secs + a.wrap_secs + a.not_ready_secs + a.dnd_secs;
+    // Legacy DND rows count as logged-in time; the flag overlaps availability, so it is
+    // reported beside it, and only inside the shift.
+    a.dnd_secs = legacyDnd + dndFlagSecs;
+    const loggedIn = a.ready_secs + a.on_call_secs + a.wrap_secs + a.not_ready_secs + legacyDnd;
     const handling = a.on_call_secs + a.wrap_secs;
     const avail = handling + a.ready_secs;
     const last = sessions[sessions.length - 1];
     const stillIn = last.open;
+    const ob = outbound.get(ext);
     result.push({
       agent: ext,
       name: dget(agentNames, ext, ''),
+      is_agent: agentQueues.has(ext) || queueLogins.has(ext),
       login: isoformat(sessions[0].login),
       logout: stillIn ? null : isoformat(last.logout as Date),
       logged_in: stillIn,
       sessions: sessions.length,
       logged_in_secs: loggedIn,
       ...a,
+      available_secs: avail,
+      idle_secs: a.ready_secs,
+      idle_dnd_secs: idleDnd,
+      break_offline_secs: breakOfflineCounted,
+      registered_secs: sideSecs(registration.get(ext), winStartDt, winEndDt, now),
+      queue_login_secs: sideSecs(queueLogins.get(ext), winStartDt, winEndDt, now),
+      outbound_calls: ob?.calls ?? 0,
+      outbound_talk_secs: ob?.talk_secs ?? 0,
       occupancy_pct: avail > 0 ? pyRound((handling / avail) * 100, 1) : 0.0,
       not_ready_breakdown: [...breakdown.values()].sort((x, y) => y.secs - x.secs),
     });
   }
 
   result.sort((x, y) => {
+    if (x.registered_secs !== y.registered_secs) return y.registered_secs - x.registered_secs;
     if (x.logged_in_secs !== y.logged_in_secs) return y.logged_in_secs - x.logged_in_secs;
     return x.agent < y.agent ? -1 : x.agent > y.agent ? 1 : 0;
   });
@@ -2583,16 +2856,25 @@ export async function computeAgentTimeline(
 
   const labels = new Map<string, Row>();
   try {
-    for (const r of await query('SELECT code, label, productive, color FROM pause_reasons')) labels.set(r.code, r);
+    for (const r of await query('SELECT code, label, productive, color, max_break_secs FROM pause_reasons')) labels.set(r.code, r);
   } catch (e) {
     log.warning('timeline reason labels: %s', e);
   }
 
   const boundary = await shiftBoundaryMinutes();
-  const segs = splitAtShiftBoundary(await segmentRows(windowStart, windowEnd, { agentExt: ext }), boundary, now);
+  const dndRows = await sideSegments('extension_dnd', windowStart, windowEnd, { agentExt: ext });
+  const segs = preparedSegments(
+    await segmentRows(windowStart, windowEnd, { agentExt: ext }), boundary, breakWindows(labels.values()), dndRows.get(ext), now,
+  );
   const sessions: Row[] = [];
   for (const s of splitSessions(segs, winStartDt, winEndDt, now, boundary)) {
-    const entries: Row[] = mergeRuns(s.segments).map((seg) => {
+    // Idle on DND is idle: the trace shows it as Ready, beside the DND stretches.
+    const plain = s.segments.map((x): Segment => {
+      if (!x.idle_dnd) return x;
+      const { idle_dnd: _ignored, ...rest } = x; // eslint-disable-line @typescript-eslint/no-unused-vars
+      return { ...rest, state: 'ready' };
+    });
+    const entries: Row[] = mergeRuns(plain).map((seg) => {
       const code = seg.reason_code ?? null;
       const meta: Row = code ? labels.get(code) ?? {} : {};
       return {
@@ -2619,5 +2901,19 @@ export async function computeAgentTimeline(
   }
 
   sessions.reverse(); // newest session first: the one a supervisor opens the row to see
-  return { agent: ext, name, sessions };
+
+  // Registration and queue-login stretches beside the availability trace.
+  const marks = async (table: SideTable) => ((await sideSegments(table, windowStart, windowEnd, { agentExt: ext })).get(ext) ?? [])
+    .map((sg) => ({
+      started_at: isoformat(sg.started_at),
+      ended_at: sg.ended_at ? isoformat(sg.ended_at) : null,
+      open: sg.ended_at === null,
+      via: sg.via ?? null,
+      duration_secs: sideSecs([sg], winStartDt, winEndDt, now),
+    }))
+    .reverse();
+  const [registration, queueLogin, dnd] = await Promise.all([
+    marks('extension_registration'), marks('queue_login'), marks('extension_dnd'),
+  ]);
+  return { agent: ext, name, sessions, registration, queue_login: queueLogin, dnd };
 }

@@ -230,8 +230,12 @@ The outcome comes from the Asterisk hangup cause and dial status (read from CEL)
 only from the CDR disposition, so a caller who gave up (`MISSED`), an unregistered phone
 (`UNREACHABLE`) and a carrier fault (`NETWORK_ERROR`) are told apart. A call with several
 legs takes its outcome, talk time and agent from the last leg someone answered (a call
-answered and then transferred to nobody is still `ANSWERED`), and a queue caller who hung
-up while waiting is `ABANDONED`.
+answered and then transferred to nobody is still `ANSWERED`).
+
+`ANSWERED` means a person (agent or extension) picked up. The PBX answering on its own is not
+an answer: a queue caller no agent took is `ABANDONED` (even though FreePBX answered them for
+hold music, and whether or not members' phones rang), and an IVR / announcement, a feature code
+(`*43`, `*97`) or a supervisor's ChanSpy leg is `ANSWERED_BY_SYSTEM`. Neither carries talk time.
 
 ### `GET /api/call-log/export`
 **Auth:** JWT (any) · **Key:** `cdr:read`
@@ -284,6 +288,40 @@ Talk/silence analysis for a recorded call, when VAD is enabled: per-speaker talk
 seconds, overlap and segments. Resolves through the call's other legs when the
 requested one was not analysed. `403` out of scope, `404` when there is no analysis.
 
+### `GET /api/call-log/recording/{call_id}`
+**Auth:** JWT (any) · **Key:** `cdr:read`
+
+Streams one call's recording by its Call ID, so an integration that stored the Call ID
+needs no `recording_path`. `call_id` is the call-log `linkedid` (the Call ID the CRM push
+carries) or the `uniqueid` of any leg of the call; given a leg, that leg's own recording
+wins over another leg's. The response is the audio file, served exactly as
+`GET /api/recordings/{path}` serves it (header credential only, `Range`/`206`), with
+`Content-Disposition: attachment; filename="<file name>"`.
+
+`403` (`Not allowed to view this call`) when the call is outside the caller's history
+scope, or the id is unknown to a scoped user; `404` (`Call not found`) for an unknown id
+otherwise, and `404` (`Recording not found`) when the call was not recorded or its file
+has been deleted.
+
+```bash
+curl -fsS -H "X-API-Key: $OPDESK_KEY" -o call.wav \
+  "https://opdesk.example.com/api/call-log/recording/1792247515.42"
+```
+
+### `GET /api/recordings`
+**Auth:** JWT (admin) · **Key:** `cdr:read`
+
+Every recorded call leg, newest first, for syncing recordings in bulk. Unlike the routes
+above this list is not scoped, so a supervisor or agent JWT is `403` (`Admin only`).
+
+Query: `limit` (default 25), `cursor` (the previous page's `next_cursor`), `search` (a
+number, `uniqueid` or `linkedid`), `date_from`, `date_to` (`YYYY-MM-DD`, inclusive).
+
+Returns `{"recordings": [{calldate, src, dst, duration, billsec, disposition, recordingfile,
+uniqueid, linkedid, recording_path, size_bytes}], "total": n, "next_cursor": "..." | null}`.
+`recording_path` and `size_bytes` are `null` when the file is no longer on disk. Download a
+row with `GET /api/recordings/{recording_path}` or `GET /api/call-log/recording/{uniqueid}`.
+
 ### `GET /api/recordings/{path}`
 **Auth:** JWT (any) · **Key:** `cdr:read`
 
@@ -295,7 +333,9 @@ fetches the file with the header and plays the result as a blob.
 a bare file name, which is looked up across the dated subdirectories. Paths are resolved
 and confined to the recording directory; anything outside it is `403`, and so is a
 recording of a call outside the caller's history scope. `Range` requests are honoured
-(`206 Partial Content`), so players can seek.
+(`206 Partial Content`), so players can seek. The `Content-Type` follows the file's format: `audio/x-wav` for
+`wav`/`wav49`, `audio/x-gsm`, `audio/G722`, `audio/basic` (ulaw), `audio/x-alaw-basic`,
+`audio/L16` (sln).
 
 The recording directory is where the recorder writes, `/var/spool/asterisk/monitor`, or
 `ASTERISK_RECORDING_ROOT_DIR` when the deployment mounts the spool elsewhere. It is shown
@@ -306,19 +346,18 @@ under Settings → Recording but cannot be changed there.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/recording/status` | (any JWT) `{enabled, format, engine, mixed_dir}` |
-| `POST /api/recording/enable` | `{format?}` (`wav` default, `wav49`, `gsm`, `g722`, `ulaw`, `alaw`, `sln`) — turn recording on |
+| `GET /api/recording/status` | (any JWT) `{enabled, format, engine, mixed_dir, single_dir}` |
+| `POST /api/recording/enable` | `{format?}` (`wav` default, `wav49`, `gsm`, `g722`, `ulaw`, `alaw`, `sln`) — turn recording on. `409` when another dialplan file already defines the PBX predial hooks (another call recorder is installed): recording stays off and the message names the file |
 | `POST /api/recording/disable` | Turn recording off |
-| `GET /api/recording/policy` | `{engine, enabled, format, mixed_dir, directions: {inbound, outbound, internal}, extensions: [{extension, name, recording}]}` |
+| `GET /api/recording/policy` | `{engine, enabled, format, mixed_dir, single_dir, directions: {inbound, outbound, internal}, extensions: [{extension, name, recording}]}` |
 | `POST /api/recording/direction/{direction}` | `{enabled}` — record `inbound`, `outbound` or `internal` calls or not |
 | `POST /api/recording/extension/{ext}` | `{recording}` — record calls involving one extension or not |
 | `POST /api/recording/extensions/bulk` | `{recording, extensions?}` — many extensions at once (all when omitted); returns `{updated: [...]}` |
 | `GET /api/recording/retention` | `{local_days, local_max_bytes, vad_delete_legs, root_dir}` |
-| `POST /api/recording/retention` | Any of the same keys; `root_dir` is read-only (sending another directory is a 400) |
-| `POST /api/recording/retention/run` | Run the daily clean-up now; returns what it deleted |
-| `GET /api/recording/storage-stats` | `{total_recordings, local: {used_bytes, max_bytes, disk_free_bytes, disk_total_bytes, retention_days}}` |
-| `GET /api/recordings` | `?limit=25&cursor=&search=&date_from=&date_to=` — `{recordings: [{calldate, src, dst, duration, billsec, recordingfile, uniqueid, linkedid, recording_path, size_bytes}], total, next_cursor}`; pass `next_cursor` as `cursor` for the next page |
-| `DELETE /api/recordings/{uniqueid}` | Delete the recording file of one call (the CDR row stays); `{deleted, deleted_legs}` |
+| `POST /api/recording/retention` | Any of the same keys, only those sent change; `root_dir` is read-only (another directory is a 400, the current one is ignored). Returns `{}` |
+| `POST /api/recording/retention/run` | Run the daily clean-up now; returns `{local_deleted, remote_deleted}` (files deleted; `remote_deleted` is always 0) |
+| `GET /api/recording/storage-stats` | `{total_recordings, local: {root_dir, used_bytes, mixed_bytes, legs_bytes, file_count, max_bytes, disk_free_bytes, disk_total_bytes, retention_days}, remote}` — `remote` is always disabled |
+| `DELETE /api/recordings/{uniqueid}` | Delete the recording file of one call (the CDR row stays); `{deleted, deleted_legs}`. `404` when the leg has no recording or its file is already gone |
 
 Recordings are kept on the PBX's disk only. The recorder keeps both directions of a call
 in one file, and the ring-only files of legs that were never answered are removed.
@@ -412,7 +451,7 @@ Direction) up to 100,000; a cut file ends with a line saying so and carries an
 session's login and the last session's logout, `null` while still logged in, cut at the
 shift reset), `logged_in`, `sessions`, `logged_in_secs` (DND included), `ready_secs`,
 `on_call_secs`, `wrap_secs`, `not_ready_secs`, `productive_not_ready_secs`, `break_secs`,
-`dnd_secs`, `occupancy_pct` and a `not_ready_breakdown` per reason code. The export adds
+`dnd_secs` (inside the shift only), `occupancy_pct` and a `not_ready_breakdown` per reason code. The export adds
 Sessions, Break and DND columns.
 
 ### `GET /api/analytics/agent-adherence/timeline`
@@ -504,8 +543,10 @@ wrap-up after a call before returning to Ready (`0` = until they end it). POST
 ### `GET|POST /api/agents/shift-reset`
 **Auth:** GET any JWT, POST admin.
 
-`{"time": "04:00"}` — the time of day at which every signed-in agent is logged out of
-their queues, so a shift left open does not run into the next one. `""` turns it off.
+`{"time": "04:00"}` — the day boundary. Status timers restart and reports split here;
+nobody leaves a queue. Anyone idle in Available is signed off (`signed_off` in
+`agent_states`) until they act, answer a call or their phone registers again. `""` turns
+it off.
 `400` unless `HH:MM` (24-hour) or empty.
 
 ---
@@ -639,7 +680,10 @@ the stored body was truncated when logged, `503` if no CRM connector is configur
 
 Who changed what. Every successful `POST`, `PUT`, `PATCH` and `DELETE` under `/api` is
 recorded — except sign-in, browser log relay, the log-capture toggles, the loopback
-hooks and device-token and push-subscription refreshes, which are noise. Request bodies
+hooks and device-token and push-subscription refreshes, which are noise. A supervisor or
+admin changing another extension's presence over the WebSocket (`agent_set_status`,
+`agent_login`, `agent_logout`, `agent_wrapup_done` with `agent`) is recorded too, as
+`update` on `agent_presence`, with the action in `detail`. Request bodies
 are never stored as they are: a route records what the change carried in `detail`, built
 from an explicit field list, with every secret-named field (`password`, `api_key`,
 `*_SECRET`, `*_PASS`, …) replaced by `"********"` — the row says a secret changed, never
@@ -648,7 +692,7 @@ what to.
 | Query | Notes |
 |---|---|
 | `action` | `create`, `update`, `delete`, … |
-| `entity_type` | What was changed: `user`, `group`, `settings`, `api_key`, … |
+| `entity_type` | What was changed: `user`, `group`, `settings`, `api_key`, `agent_presence`, … |
 | `actor` | The acting user's name, username or extension |
 | `from`, `to` | `YYYY-MM-DD`, inclusive |
 | `limit`, `cursor` | Cursor paging, newest first; pass the previous page's `next_cursor` |
@@ -688,6 +732,7 @@ the admin role. None are key-reachable.
 
 | Area | Paths |
 |---|---|
+| Supervisor's team | `GET /api/settings/users` (the agents of their groups), `POST /api/settings/users` (role `agent` only; needs an unassigned PBX extension, which joins every group of the supervisor), `GET /api/settings/extensions/available` |
 | Users, groups, agents, queues | `/api/settings/users*`, `/api/settings/groups*`, `/api/settings/agents`, `/api/settings/queues`. A username, extension or group name already in use is `409`. A user's `password` (8+ characters) is the OpDesk sign-in password only and never changes the extension's SIP secret; that is `PUT /api/settings/extensions/{extension}/credentials`. Unlinking or moving a user off an extension, deactivating them, or deleting them gives that extension a fresh random SIP secret (its phones sign out), so the person can no longer register with the one they knew. A save that landed in OpDesk but not in the PBX (name, secret or reload) is a `502` that says what did not apply. |
 | Contacts phonebook | `GET /api/contacts?search=&limit=&cursor=`, `GET /api/contacts/{id}` (any role; key: `contacts:read`), `POST /api/contacts`, `POST /api/contacts/bulk` (admin; key: `contacts:write`, upsert with precedence manual > api > crm, max 500 per request), `PUT|DELETE /api/contacts/{id}` (admin) — see [contact-lookup.md](contact-lookup.md) |
 | Raw settings key/value store | `GET|POST /api/settings`, `GET /api/settings/{key}` — secrets read back as `"********"`, and posting the mask keeps the stored value |

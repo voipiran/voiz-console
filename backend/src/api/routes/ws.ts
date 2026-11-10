@@ -12,7 +12,8 @@
  *
  * Server -> client frames: initial_state, state_update, action_result {action, success,
  * message?}, error {message}, call_notification_new {extension}, call_outcome
- * {extension, status, linkedid}.
+ * {extension, status, linkedid}, presence_changed_by {extension, by, action, status,
+ * reason_code, enabled} (to the agent whose presence a supervisor just changed).
  */
 
 import type { IncomingMessage, Server as HttpServer } from 'http';
@@ -500,19 +501,23 @@ export async function handleClientMessage(websocket: WebSocket, message: unknown
           await send(actionResult(action, false, refusal));
           return;
         }
-        let result: boolean;
-        let verb: string;
-        if (action === 'listen') {
-          result = await monitor.listenToCall(supervisor, target);
-          verb = 'listening to';
-        } else if (action === 'whisper') {
-          result = await monitor.whisperToCall(supervisor, target);
-          verb = 'whispering to';
-        } else {
-          result = await monitor.bargeIntoCall(supervisor, target);
-          verb = 'barging into';
-        }
-        await send(actionResult(action, result, `${result ? 'Started' : 'Failed to start'} ${verb} ${target}`));
+        // Not awaited: the result comes only once the supervisor's phone is answered (up to
+        // SPY_RING_TIMEOUT), and this socket's other commands must not queue behind it.
+        void (async () => {
+          let result: boolean;
+          let verb: string;
+          if (action === 'listen') {
+            result = await monitor.listenToCall(supervisor, target);
+            verb = 'listening to';
+          } else if (action === 'whisper') {
+            result = await monitor.whisperToCall(supervisor, target);
+            verb = 'whispering to';
+          } else {
+            result = await monitor.bargeIntoCall(supervisor, target);
+            verb = 'barging into';
+          }
+          await send(actionResult(action, result, `${result ? 'Started' : 'Failed to start'} ${verb} ${target}`));
+        })().catch((e) => log.error(`${action} failed: ${pyStr(e)}`));
         return;
       }
       case 'hangup': {
@@ -655,9 +660,10 @@ async function handleAgentAction(action: string, m: Record<string, unknown>, sco
   const src = target !== String(scope.extension || '') ? 'supervisor' : 'ui';
   let result: [boolean, string];
   if (action === 'agent_login') {
-    result = await agentState.login(target, src);
+    // Queue login only: availability follows the phone and is never changed here.
+    result = await agentState.queueLogin(target, src);
   } else if (action === 'agent_logout') {
-    result = await agentState.logout(target, src);
+    result = await agentState.queueLogout(target, src);
   } else if (action === 'agent_wrapup_done') {
     result = await agentState.finishWrapup(target, src);
   } else {
@@ -666,11 +672,47 @@ async function handleAgentAction(action: string, m: Record<string, unknown>, sco
     else if (status === 'not_ready') {
       const code = pyStr(get(m, 'reason_code', '') ?? '').trim();
       result = code ? await agentState.setNotReady(target, code, src) : [false, NOT_READY_REASON_ERROR];
-    } else if (status === 'dnd') result = await agentState.setDnd(target, src);
-    else if (status === 'available') result = await agentState.setAvailable(target, src);
-    else if (status === 'offline') result = await agentState.setOffline(target, src);
-    else result = [false, 'Unknown status'];
+    } else if (status === 'dnd') {
+      // {enabled: false} turns it off; on is the default.
+      const raw = get(m, 'enabled', true);
+      result = await agentState.setDnd(target, raw === undefined || raw === null ? true : truthy(raw), src);
+    } else if (status === 'dnd_off' || status === 'available') {
+      // 'available' is the old "clear DND" of a plain extension.
+      result = await agentState.setDnd(target, false, src);
+    } else if (status === 'offline') {
+      result = [false, 'Availability follows the phone: close the softphone (unregister) to go offline'];
+    } else result = [false, 'Unknown status'];
   }
   await send(actionResult(action, result[0], result[1]));
   if (result[0]) await broadcastNow();
+  if (result[0] && src === 'supervisor') noteSupervisorChange(action, m, scope, target);
+}
+
+/**
+ * A supervisor changed someone else's presence: tell that agent's screens (a toast) and
+ * write an audit row (the HTTP audit middleware never sees a WebSocket action). Both are
+ * best-effort and never fail the action that already succeeded.
+ */
+function noteSupervisorChange(action: string, m: Record<string, unknown>, scope: LiveScope, target: string): void {
+  const status = pyStr(get(m, 'status', '') ?? '').trim() || null;
+  const reasonCode = pyStr(get(m, 'reason_code', '') ?? '').trim() || null;
+  const rawEnabled = get(m, 'enabled', undefined);
+  const enabled = status === 'dnd' ? (rawEnabled === undefined || rawEnabled === null ? true : truthy(rawEnabled)) : null;
+  const by = pyStr(scope.username ?? '') || String(scope.extension || '') || 'supervisor';
+  const frame = { type: 'presence_changed_by', extension: target, by, action, status, reason_code: reasonCode, enabled };
+  createTask((async () => {
+    for (const ws of [...runtime.manager.activeConnections]) {
+      const s = runtime.manager.getScope(ws) as LiveScope;
+      if (String(s.extension || '').trim() === target) await runtime.manager.sendPersonal(ws, frame);
+    }
+  })());
+  createTask(
+    dbm.insertAuditLog('update', 'agent_presence', {
+      actorExt: scope.extension ? String(scope.extension) : by,
+      actorUserId: typeof scope.user_id === 'number' ? scope.user_id : null,
+      entityId: target,
+      summary: `WS ${action}${status ? ` ${status}` : ''} for ${target}`,
+      detail: JSON.stringify({ action, status, reason_code: reasonCode, enabled }),
+    }).then((ok) => { if (!ok) log.error('audit log write failed for %s on %s (audit record lost)', action, target); }),
+  );
 }
